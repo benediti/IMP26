@@ -57,6 +57,10 @@ SHEET_CONFIG = {
 def init_session_state() -> None:
     for key, value in SESSION_DEFAULTS.items():
         st.session_state.setdefault(key, value)
+    
+    # Auto-load from Firestore on first run
+    if st.session_state.excel_data is None and firestore_enabled():
+        sync_firestore_to_session()
 
 
 def ensure_columns(df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
