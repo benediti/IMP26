@@ -1224,7 +1224,7 @@ def render_approved_orders_tab() -> None:
         # Fetch approved orders
         approved_orders = db.collection(FIRESTORE_COLLECTION)\
             .where("status", "==", "pedido")\
-            .order_by("approved_at", direction=firestore.Query.DIRECTION_DESCENDING)\
+            .order_by("approved_at", direction=firestore.Query.DESCENDING)\
             .stream()
         
         orders_list = []
