@@ -26,6 +26,8 @@ SESSION_DEFAULTS = {
     "cart": [],
     "selected_setor": None,
     "firestore_client": None,
+    "edit_client": None,
+    "edit_indices": [],
 }
 SHEET_CONFIG = {
     "Produtos": None,
@@ -800,119 +802,116 @@ def render_aguardando_tab() -> None:
         st.info("Nenhum item aguardando aprovação.")
         return
 
-    filtro = st.text_input("Filtrar por setor ou descrição", key="filtro_aguardando")
-    view_df = df.copy()
-    if filtro:
-        filtro_lower = filtro.lower()
-        view_df = view_df[
-            view_df["SETOR2"].astype(str).str.lower().str.contains(filtro_lower)
-            | view_df["Setor"].astype(str).str.lower().str.contains(filtro_lower)
-        ]
-
-    st.dataframe(view_df.drop(columns=["__doc_id"], errors="ignore"), use_container_width=True, height=400)
-
-    indices = view_df.index.tolist()
-    selecionados = st.multiselect(
-        "Selecione linhas para aprovar/remover",
-        indices,
-        format_func=lambda idx: f"{parse_int(df.loc[idx, 'Setor'])} - {df.loc[idx, 'SETOR2']} | {df.loc[idx, 'Item']}",
-    )
-
-    col1, col2 = st.columns(2)
-    if col1.button("Aprovar selecionados") and selecionados:
-        if firestore_enabled():
-            db = get_firestore_client()
-            for idx in selecionados:
-                doc_id = df.loc[idx, "__doc_id"]
-                db.collection(FIRESTORE_COLLECTION).document(doc_id).update(
-                    {"status": "pedido", "updated_at": firestore.SERVER_TIMESTAMP}
+    # Group by client
+    by_client = df.groupby("SETOR2")
+    
+    for client, group_df in by_client:
+        with st.expander(f"📋 **{client}** ({len(group_df)} itens)", expanded=False):
+            # Display items table
+            st.write("**Itens:**")
+            view_df = group_df[["Item", "CódProImpakto", "Qtde", "$ Unitário", "$ Total", "Unidade"]].copy()
+            st.dataframe(view_df, use_container_width=True)
+            
+            # Edit options
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                if st.button(f"✅ Aprovar '{client}'", key=f"approve_{client}"):
+                    if firestore_enabled():
+                        db = get_firestore_client()
+                        for idx in group_df.index:
+                            doc_id = df.loc[idx, "__doc_id"]
+                            db.collection(FIRESTORE_COLLECTION).document(doc_id).update(
+                                {"status": "pedido", "updated_at": firestore.SERVER_TIMESTAMP}
+                            )
+                        sync_firestore_to_session()
+                    st.success(f"✅ Pedido de {client} aprovado!")
+                    st.rerun()
+            
+            with col2:
+                if st.button(f"❌ Rejeitar '{client}'", key=f"reject_{client}"):
+                    if firestore_enabled():
+                        db = get_firestore_client()
+                        for idx in group_df.index:
+                            doc_id = df.loc[idx, "__doc_id"]
+                            db.collection(FIRESTORE_COLLECTION).document(doc_id).delete()
+                        sync_firestore_to_session()
+                    st.warning(f"❌ Pedido de {client} removido!")
+                    st.rerun()
+            
+            with col3:
+                if st.button(f"✏️ Editar '{client}'", key=f"edit_{client}"):
+                    st.session_state.edit_client = client
+                    st.session_state.edit_indices = group_df.index.tolist()
+            
+            # Edit mode
+            if st.session_state.get("edit_client") == client:
+                st.divider()
+                st.write("**Editar itens:**")
+                
+                # Remove items
+                st.write("**Remover itens:**")
+                items_to_remove = st.multiselect(
+                    "Selecione itens para remover",
+                    st.session_state.edit_indices,
+                    format_func=lambda idx: f"{df.loc[idx, 'Item']} (Qtde: {df.loc[idx, 'Qtde']})",
+                    key=f"remove_{client}"
                 )
-            sync_firestore_to_session()
-        else:
-            mover = df.loc[selecionados]
-            destino = st.session_state.excel_data.get("Pedido", pd.DataFrame())
-            destino = pd.concat([destino, mover], ignore_index=True)
-            st.session_state.excel_data["Pedido"] = destino
-            st.session_state.excel_data["Aguardando Aprovação"] = (
-                df.drop(index=selecionados).reset_index(drop=True)
-            )
-        st.toast(f"{len(selecionados)} linha(s) aprovadas e movidas.", icon="✅")
-        st.rerun()
-
-    if col2.button("Excluir selecionados") and selecionados:
-        if firestore_enabled():
-            db = get_firestore_client()
-            for idx in selecionados:
-                doc_id = df.loc[idx, "__doc_id"]
-                db.collection(FIRESTORE_COLLECTION).document(doc_id).delete()
-            sync_firestore_to_session()
-        else:
-            st.session_state.excel_data["Aguardando Aprovação"] = (
-                df.drop(index=selecionados).reset_index(drop=True)
-            )
-        st.toast(f"{len(selecionados)} linha(s) removidas.", icon="⚠️")
-        st.rerun()
-
-    st.markdown("### Carregar pedido para edição")
-    combos = (
-        df[["Setor", "SETOR2"]]
-        .dropna()
-        .drop_duplicates()
-        .assign(Setor=lambda frame: frame["Setor"].apply(parse_int))
-        .sort_values(["SETOR2", "Setor"])
-    )
-    if combos.empty:
-        st.info("Nenhum agrupamento disponível.")
-        return
-
-    combo_options = combos.apply(
-        lambda row: {
-            "codigo": row["Setor"],
-            "descricao": row["SETOR2"],
-            "label": f"{parse_int(row['Setor'])} - {row['SETOR2']}",
-        },
-        axis=1,
-    ).tolist()
-
-    selected_combo = st.selectbox(
-        "Selecione o setor para edição",
-        combo_options,
-        format_func=lambda item: item["label"],
-    )
-
-    if st.button("Carregar itens do setor", use_container_width=True):
-        mask = (df["Setor"].apply(parse_int) == selected_combo["codigo"]) & (
-            df["SETOR2"] == selected_combo["descricao"]
-        )
-        linhas = df[mask]
-        if linhas.empty:
-            st.warning("Nenhuma linha encontrada para este setor.")
-        else:
-            st.session_state.cart = []
-            for _, row in linhas.iterrows():
-                st.session_state.cart.append(
-                    {
-                        "codigo": str(row["CódProImpakto"]),
-                        "nome": str(row["Item"]),
-                        "quantidade": int(row["Qtde"]),
-                        "preco_unitario": parse_float(row["$ Unitário"]),
-                        "total": parse_float(row["$ Total"]),
-                    }
+                
+                if items_to_remove:
+                    if st.button(f"🗑️ Remover selecionados", key=f"confirm_remove_{client}"):
+                        if firestore_enabled():
+                            db = get_firestore_client()
+                            for idx in items_to_remove:
+                                doc_id = df.loc[idx, "__doc_id"]
+                                db.collection(FIRESTORE_COLLECTION).document(doc_id).delete()
+                            sync_firestore_to_session()
+                        st.success("Itens removidos!")
+                        st.session_state.edit_client = None
+                        st.rerun()
+                
+                # Add new items
+                st.write("**Adicionar itens:**")
+                new_produto = st.selectbox(
+                    "Produto",
+                    st.session_state.excel_data.get("Produtos", pd.DataFrame()),
+                    key=f"new_produto_{client}"
                 )
-            st.session_state.selected_setor = {
-                "codigo": selected_combo["codigo"],
-                "descricao": selected_combo["descricao"],
-                "label": selected_combo["label"],
-            }
-            if firestore_enabled():
-                db = get_firestore_client()
-                for _, row in linhas.iterrows():
-                    db.collection(FIRESTORE_COLLECTION).document(row["__doc_id"]).delete()
-                sync_firestore_to_session()
-            else:
-                st.session_state.excel_data["Aguardando Aprovação"] = df[~mask].reset_index(drop=True)
-            st.toast("Itens carregados para edição. Volte à aba 'Novo Pedido'.", icon="✏️")
-            st.rerun()
+                new_qtde = st.number_input(
+                    "Quantidade",
+                    min_value=1,
+                    value=1,
+                    key=f"new_qtde_{client}"
+                )
+                
+                if st.button(f"➕ Adicionar item", key=f"add_item_{client}"):
+                    # Get first row from group to use as template
+                    template = group_df.iloc[0].to_dict()
+                    
+                    # Create new item
+                    novo_item = template.copy()
+                    novo_item["Item"] = new_produto
+                    novo_item["Qtde"] = new_qtde
+                    novo_item["status"] = "aguardando"
+                    novo_item["created_at"] = firestore.SERVER_TIMESTAMP
+                    novo_item["updated_at"] = firestore.SERVER_TIMESTAMP
+                    
+                    # Remove doc_id to create new document
+                    if "__doc_id" in novo_item:
+                        del novo_item["__doc_id"]
+                    
+                    if firestore_enabled():
+                        db = get_firestore_client()
+                        db.collection(FIRESTORE_COLLECTION).add(novo_item)
+                        sync_firestore_to_session()
+                    
+                    st.success("Item adicionado!")
+                    st.session_state.edit_client = None
+                    st.rerun()
+                
+                if st.button(f"✖️ Cancelar edição", key=f"cancel_{client}"):
+                    st.session_state.edit_client = None
+                    st.rerun()
 
 
 def render_new_order_tab() -> None:
