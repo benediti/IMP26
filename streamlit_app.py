@@ -263,25 +263,29 @@ def render_sidebar() -> None:
     storage_path = get_storage_path()
 
     with st.sidebar:
-        st.header("Fonte de dados")
-        st.caption(
-            "Envie a planilha Excel original para começar ou carregue o arquivo salvo no servidor."
-        )
-
-        uploaded = st.file_uploader("Carregar planilha (.xlsx)", type=["xlsx", "xls"])
-        if uploaded is not None:
-            set_excel_data(uploaded.getvalue(), f"upload ({uploaded.name})")
-
+        st.header("Gerenciar dados")
+        
         if firestore_enabled():
+            st.success("✅ Dados do Firestore carregados automaticamente")
             st.divider()
-            if st.button("Recarregar dados do Firestore", use_container_width=True):
+            
+            if st.button("🔄 Recarregar dados do Firestore", use_container_width=True):
                 sync_firestore_to_session()
-                st.toast("Dados carregados do Firestore.", icon="✅")
+                st.toast("Dados recarregados do Firestore.", icon="✅")
 
             if st.session_state.excel_data is not None:
                 produtos_df = st.session_state.excel_data.get("Produtos", pd.DataFrame())
                 setores_df = st.session_state.excel_data.get("Setor", pd.DataFrame())
-                if st.button("Enviar Produtos/Setor para Firestore", use_container_width=True):
+                
+                st.divider()
+                st.caption("📤 Para atualizar Produtos/Setor, carregue Excel e envie:")
+                
+                uploaded = st.file_uploader("Carregar planilha (.xlsx)", type=["xlsx", "xls"])
+                if uploaded is not None:
+                    set_excel_data(uploaded.getvalue(), f"upload ({uploaded.name})")
+                    st.rerun()
+                
+                if st.button("📤 Enviar Produtos/Setor para Firestore", use_container_width=True):
                     if produtos_df.empty or setores_df.empty:
                         st.error("Carregue uma planilha com Produtos e Setor antes de enviar.")
                     else:
@@ -297,6 +301,11 @@ def render_sidebar() -> None:
                         )
                         sync_firestore_reference_data()
                         st.toast("Produtos e setores enviados ao Firestore.", icon="✅")
+        else:
+            st.warning("⚠️ Firestore não disponível. Carregue uma planilha:")
+            uploaded = st.file_uploader("Carregar planilha (.xlsx)", type=["xlsx", "xls"])
+            if uploaded is not None:
+                set_excel_data(uploaded.getvalue(), f"upload ({uploaded.name})")
 
         if storage_path:
             st.divider()
@@ -307,11 +316,6 @@ def render_sidebar() -> None:
                         set_excel_data(handler.read(), os.path.basename(storage_path))
                 else:
                     st.error("Arquivo configurado não encontrado no servidor.")
-
-        if st.session_state.excel_source:
-            st.info(f"Planilha atual: {st.session_state.excel_source}")
-        else:
-            st.warning("Nenhuma planilha carregada ainda.")
 
 
 def build_workbook_bytes(data: Dict[str, pd.DataFrame]) -> io.BytesIO:
