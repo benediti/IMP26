@@ -725,18 +725,23 @@ def generate_previa_pdf() -> Optional[io.BytesIO]:
 def render_previa_download() -> None:
     pdf_buffer = generate_previa_pdf()
     if pdf_buffer is None:
-        st.button("Baixar prévia em PDF", disabled=True)
         return
 
+    st.info("📋 Prévia do pedido gerada")
     setor = st.session_state.selected_setor
     file_name = f"PREVIA_Pedido_{setor['codigo']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-    st.download_button(
-        "Baixar prévia em PDF",
-        data=pdf_buffer.getvalue(),
-        file_name=file_name,
-        mime="application/pdf",
-        use_container_width=True,
-    )
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.download_button(
+            "📥 Baixar PDF (para imprimir)",
+            data=pdf_buffer.getvalue(),
+            file_name=file_name,
+            mime="application/pdf",
+            use_container_width=True,
+        )
+    with col2:
+        st.caption("✅ Será também salvo no Storage ao clicar em 'Salvar'")
 
 
 def render_save_buttons() -> None:
