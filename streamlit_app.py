@@ -19,6 +19,8 @@ FIRESTORE_COLLECTION = "pedido_itens"
 FIRESTORE_PRODUCTS_COLLECTION = "produtos"
 FIRESTORE_SETORES_COLLECTION = "setores"
 FIRESTORE_PDF_BUCKET = "material-basico"
+FIRESTORE_AUDIT_COLLECTION = "audit_trail"
+APP_PASSWORD = os.getenv("APP_PASSWORD", "admin123")  # Default for testing
 SESSION_DEFAULTS = {
     "excel_data": None,
     "excel_source": "",
@@ -28,6 +30,8 @@ SESSION_DEFAULTS = {
     "firestore_client": None,
     "edit_client": None,
     "edit_indices": [],
+    "authenticated": False,
+    "current_user": None,
 }
 SHEET_CONFIG = {
     "Produtos": None,
@@ -64,6 +68,73 @@ def init_session_state() -> None:
     # Auto-load from Firestore on first run
     if st.session_state.excel_data is None and firestore_enabled():
         sync_firestore_to_session()
+
+
+def check_authentication() -> bool:
+    """Simple password authentication."""
+    if st.session_state.authenticated:
+        return True
+    
+    if not firestore_enabled():
+        st.session_state.authenticated = True
+        st.session_state.current_user = "Offline"
+        return True
+    
+    return False
+
+
+def render_login() -> bool:
+    """Render login page."""
+    st.set_page_config(page_title="Sistema de Gestão - Login", layout="centered")
+    st.markdown("# 🔐 Login - Sistema de Gestão de Pedidos")
+    st.divider()
+    
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        username = st.text_input("👤 Usuário")
+    with col2:
+        password = st.text_input("🔑 Senha", type="password")
+    
+    if st.button("Entrar", use_container_width=True):
+        if password == APP_PASSWORD:
+            st.session_state.authenticated = True
+            st.session_state.current_user = username if username else "Usuario"
+            st.success(f"✅ Bem-vindo, {st.session_state.current_user}!")
+            st.rerun()
+        else:
+            st.error("❌ Senha incorreta!")
+    
+    st.divider()
+    st.caption("💡 Senha padrão: **admin123** (configure com variável `APP_PASSWORD`)")
+
+
+def log_audit(action: str, details: Dict) -> None:
+    """Log audit trail to Firestore."""
+    if not firestore_enabled():
+        return
+    
+    try:
+        db = get_firestore_client()
+        audit_log = {
+            "action": action,
+            "user": st.session_state.get("current_user", "unknown"),
+            "timestamp": firestore.SERVER_TIMESTAMP,
+            "details": details,
+        }
+        db.collection(FIRESTORE_AUDIT_COLLECTION).add(audit_log)
+    except Exception as exc:
+        st.warning(f"⚠️ Erro ao registrar auditoria: {exc}")
+
+
+def compare_orders(original: Dict, modified: Dict) -> Dict:
+    """Compare original and modified orders to get changes."""
+    changes = {}
+    for key in ["Qtde", "Item", "$ Unitário", "$ Total"]:
+        orig_val = original.get(key)
+        mod_val = modified.get(key)
+        if orig_val != mod_val:
+            changes[key] = {"de": orig_val, "para": mod_val}
+    return changes
 
 
 def ensure_columns(df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
@@ -829,11 +900,25 @@ def render_aguardando_tab() -> None:
                         db = get_firestore_client()
                         for idx in group_df.index:
                             doc_id = df.loc[idx, "__doc_id"]
-                            db.collection(FIRESTORE_COLLECTION).document(doc_id).update(
-                                {"status": "pedido", "updated_at": firestore.SERVER_TIMESTAMP}
-                            )
+                            original_data = df.loc[idx].to_dict()
+                            
+                            db.collection(FIRESTORE_COLLECTION).document(doc_id).update({
+                                "status": "pedido",
+                                "approved_by": st.session_state.get("current_user", "unknown"),
+                                "approved_at": firestore.SERVER_TIMESTAMP,
+                                "updated_at": firestore.SERVER_TIMESTAMP,
+                            })
+                            
+                            # Log audit trail
+                            log_audit("order_approved", {
+                                "doc_id": doc_id,
+                                "client": client,
+                                "items_count": len(group_df),
+                                "total_value": group_df["$ Total"].sum(),
+                            })
+                        
                         sync_firestore_to_session()
-                    st.success(f"✅ Pedido de {client} aprovado!")
+                    st.success(f"✅ Pedido de {client} aprovado! (Usuário: {st.session_state.get('current_user', 'unknown')})")
                     st.rerun()
             
             with col4:
@@ -967,22 +1052,110 @@ def render_new_order_tab() -> None:
     render_save_buttons()
 
 
+def render_approved_orders_tab() -> None:
+    """Exibe pedidos aprovados com histórico de auditoria completo."""
+    st.subheader("📋 Pedidos Aprovados - Histórico")
+    
+    try:
+        db = get_firestore_client()
+        
+        # Fetch approved orders
+        approved_orders = db.collection(FIRESTORE_COLLECTION)\
+            .where("status", "==", "pedido")\
+            .order_by("approved_at", direction=firestore.Query.DIRECTION_DESCENDING)\
+            .stream()
+        
+        orders_list = []
+        for doc in approved_orders:
+            order_data = doc.to_dict()
+            order_data["__doc_id"] = doc.id
+            orders_list.append(order_data)
+        
+        if not orders_list:
+            st.info("ℹ️ Nenhum pedido aprovado ainda.")
+            return
+        
+        # Group by client
+        orders_df = pd.DataFrame(orders_list)
+        grouped = orders_df.groupby("Setor")
+        
+        for client, group_df in grouped:
+            with st.container(border=True):
+                col1, col2, col3 = st.columns([2, 1, 1])
+                col1.markdown(f"**👤 {client}**")
+                col2.metric("Pedidos", len(group_df))
+                col3.metric("Total", f"R$ {group_df['$ Total'].sum():.2f}")
+                
+                # Display each approved order
+                for idx, order in group_df.iterrows():
+                    with st.expander(f"📦 Pedido #{idx + 1} - Aprovado em {order.get('approved_at', 'N/A')}"):
+                        col_info, col_user = st.columns([3, 1])
+                        
+                        with col_info:
+                            st.write("**Informações:**")
+                            st.write(f"- Criado em: {order.get('created_at', 'N/A')}")
+                            st.write(f"- Aprovado em: {order.get('approved_at', 'N/A')}")
+                            st.write(f"- Total: R$ {order.get('$ Total', 0):.2f}")
+                        
+                        with col_user:
+                            st.write("**Aprovado por:**")
+                            st.write(f"👤 {order.get('approved_by', 'unknown')}")
+                        
+                        # Fetch and display audit trail
+                        st.write("**Histórico de Auditoria:**")
+                        audit_docs = db.collection(FIRESTORE_AUDIT_COLLECTION)\
+                            .where("doc_id", "==", order.get("__doc_id"))\
+                            .stream()
+                        
+                        audit_list = []
+                        for audit_doc in audit_docs:
+                            audit_data = audit_doc.to_dict()
+                            audit_list.append(audit_data)
+                        
+                        if audit_list:
+                            audit_df = pd.DataFrame(audit_list)
+                            for _, audit_row in audit_df.iterrows():
+                                st.write(f"- **{audit_row.get('action')}** por {audit_row.get('username')} em {audit_row.get('timestamp')}")
+                                if audit_row.get('details'):
+                                    st.json(audit_row.get('details'))
+                        else:
+                            st.write("- Nenhum registro de auditoria disponível")
+    
+    except Exception as e:
+        st.error(f"❌ Erro ao carregar pedidos aprovados: {e}")
+
+
 def main() -> None:
     st.set_page_config(page_title="Sistema de Gestão de Pedidos", layout="wide")
     init_session_state()
     st.title("Sistema de Gestão de Pedidos - Versão Web")
     st.caption("Interface Streamlit preparada para deploy em serviços como Railway ou Render.")
 
+    # Check authentication
+    if not check_authentication():
+        render_login()
+        st.stop()
+    
+    # Display current user in sidebar
+    with st.sidebar:
+        st.write(f"👤 Usuário: **{st.session_state.current_user}**")
+        if st.button("Sair"):
+            st.session_state.authenticated = False
+            st.session_state.current_user = None
+            st.rerun()
+
     render_sidebar()
 
     if st.session_state.excel_data is None:
         st.stop()
 
-    tab_novo, tab_aguardando = st.tabs(["Novo Pedido", "Aguardando Aprovação"])
+    tab_novo, tab_aguardando, tab_aprovados = st.tabs(["Novo Pedido", "Aguardando Aprovação", "📋 Pedidos Aprovados"])
     with tab_novo:
         render_new_order_tab()
     with tab_aguardando:
         render_aguardando_tab()
+    with tab_aprovados:
+        render_approved_orders_tab()
 
     render_download_section()
 
