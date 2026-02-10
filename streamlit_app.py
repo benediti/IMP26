@@ -1058,7 +1058,10 @@ def render_aguardando_tab() -> None:
             # Buttons
             with col3:
                 if st.button("✏️", key=f"edit_{client}", help="Alterar"):
-                    st.session_state.edit_client = client
+                    if st.session_state.get("edit_client") == client:
+                        st.session_state.edit_client = None
+                    else:
+                        st.session_state.edit_client = client
 
             with col4:
                 if st.button(f"✅", key=f"approve_{client}", help="Aprovar"):
@@ -1166,6 +1169,15 @@ def render_aguardando_tab() -> None:
                     key=f"editor_{client}",
                 )
 
+                edited_total = 0.0
+                for _, row in edited_df.iterrows():
+                    label = row.get("Produto")
+                    qtde = parse_int(row.get("Qtde"))
+                    produto = produtos_map.get(label)
+                    if produto:
+                        edited_total += parse_float(produto.get("price")) * qtde
+                st.metric("Total (previa)", format_currency(edited_total))
+
                 if st.button("💾 Salvar alteracoes", key=f"save_edit_{client}"):
                     if firestore_enabled():
                         db = get_firestore_client()
@@ -1195,103 +1207,105 @@ def render_aguardando_tab() -> None:
 
                 col_remove, col_add = st.columns([1, 1])
                 with col_remove:
-                    st.markdown("**Remover itens:**")
-                    items_to_remove = st.multiselect(
-                        "Selecione itens para remover",
-                        group_df.index,
-                        format_func=lambda idx: f"🗑️ {df.loc[idx, 'Item']} (Qtde: {df.loc[idx, 'Qtde']})",
-                        key=f"remove_{client}",
-                        label_visibility="collapsed",
-                    )
-
-                    if items_to_remove and st.button(
-                        "🗑️ Remover selecionados",
-                        key=f"confirm_remove_{client}",
-                        use_container_width=True,
-                    ):
-                        if firestore_enabled():
-                            db = get_firestore_client()
-                            for idx in items_to_remove:
-                                doc_id = df.loc[idx, "__doc_id"]
-                                db.collection(FIRESTORE_COLLECTION).document(doc_id).delete()
-                            sync_firestore_to_session()
-                        st.success("✅ Itens removidos!")
-                        st.rerun()
-
-                with col_add:
-                    st.markdown("**Adicionar itens:**")
-                    produtos_list = st.session_state.excel_data.get("Produtos", pd.DataFrame()).copy()
-                    new_produto_label = None
-                    produtos_map = {}
-                    if not produtos_list.empty:
-                        produtos_list["price"] = pd.to_numeric(
-                            produtos_list.get("price"), errors="coerce"
-                        ).fillna(0.0)
-                        produtos_list["label"] = produtos_list.apply(
-                            lambda row: f"{row['productCode']} - {row['name']}", axis=1
-                        )
-                        produtos_map = {
-                            row["label"]: row for _, row in produtos_list.iterrows()
-                        }
-                        busca = st.text_input(
-                            "Buscar produto (codigo ou nome)",
-                            key=f"search_add_{client}",
+                    with st.container(border=True):
+                        st.markdown("**Remover itens:**")
+                        items_to_remove = st.multiselect(
+                            "Selecione itens para remover",
+                            group_df.index,
+                            format_func=lambda idx: f"🗑️ {df.loc[idx, 'Item']} (Qtde: {df.loc[idx, 'Qtde']})",
+                            key=f"remove_{client}",
                             label_visibility="collapsed",
                         )
-                        if busca:
-                            busca_lower = busca.lower()
-                            produtos_list = produtos_list[
-                                produtos_list["name"].astype(str).str.lower().str.contains(busca_lower)
-                                | produtos_list["productCode"].astype(str).str.lower().str.contains(busca_lower)
-                            ]
-                        if not produtos_list.empty:
-                            new_produto_label = st.selectbox(
-                                "Produto",
-                                produtos_list["label"].tolist(),
-                                key=f"new_produto_{client}",
-                                label_visibility="collapsed",
-                            )
-                        else:
-                            st.info("Nenhum produto encontrado com esse filtro.")
-                    else:
-                        st.warning("Lista de produtos vazia.")
 
-                    new_qtde = st.number_input(
-                        "Quantidade",
-                        min_value=1,
-                        value=1,
-                        key=f"new_qtde_{client}",
-                        label_visibility="collapsed",
-                    )
-
-                    if new_produto_label and st.button(
-                        "➕ Adicionar",
-                        key=f"add_item_{client}",
-                        use_container_width=True,
-                    ):
-                        produto = produtos_map.get(new_produto_label)
-                        if produto is None:
-                            st.error("❌ Produto invalido.")
-                        else:
-                            template = group_df.iloc[0].to_dict()
-                            novo_item = template.copy()
-                            novo_item["CódProImpakto"] = str(produto.get("productCode"))
-                            novo_item["Item"] = str(produto.get("name"))
-                            novo_item["Qtde"] = new_qtde
-                            novo_item["$ Unitário"] = parse_float(produto.get("price"))
-                            novo_item["$ Total"] = parse_float(produto.get("price")) * new_qtde
-                            novo_item["status"] = "aguardando"
-
-                            if "__doc_id" in novo_item:
-                                del novo_item["__doc_id"]
-
+                        if items_to_remove and st.button(
+                            "🗑️ Remover selecionados",
+                            key=f"confirm_remove_{client}",
+                            use_container_width=True,
+                        ):
                             if firestore_enabled():
                                 db = get_firestore_client()
-                                db.collection(FIRESTORE_COLLECTION).add(novo_item)
+                                for idx in items_to_remove:
+                                    doc_id = df.loc[idx, "__doc_id"]
+                                    db.collection(FIRESTORE_COLLECTION).document(doc_id).delete()
                                 sync_firestore_to_session()
-
-                            st.success("✅ Item adicionado!")
+                            st.success("✅ Itens removidos!")
                             st.rerun()
+
+                with col_add:
+                    with st.container(border=True):
+                        st.markdown("**Adicionar itens:**")
+                        produtos_list = st.session_state.excel_data.get("Produtos", pd.DataFrame()).copy()
+                        new_produto_label = None
+                        produtos_map = {}
+                        if not produtos_list.empty:
+                            produtos_list["price"] = pd.to_numeric(
+                                produtos_list.get("price"), errors="coerce"
+                            ).fillna(0.0)
+                            produtos_list["label"] = produtos_list.apply(
+                                lambda row: f"{row['productCode']} - {row['name']}", axis=1
+                            )
+                            produtos_map = {
+                                row["label"]: row for _, row in produtos_list.iterrows()
+                            }
+                            busca = st.text_input(
+                                "Buscar produto (codigo ou nome)",
+                                key=f"search_add_{client}",
+                                label_visibility="collapsed",
+                            )
+                            if busca:
+                                busca_lower = busca.lower()
+                                produtos_list = produtos_list[
+                                    produtos_list["name"].astype(str).str.lower().str.contains(busca_lower)
+                                    | produtos_list["productCode"].astype(str).str.lower().str.contains(busca_lower)
+                                ]
+                            if not produtos_list.empty:
+                                new_produto_label = st.selectbox(
+                                    "Produto",
+                                    produtos_list["label"].tolist(),
+                                    key=f"new_produto_{client}",
+                                    label_visibility="collapsed",
+                                )
+                            else:
+                                st.info("Nenhum produto encontrado com esse filtro.")
+                        else:
+                            st.warning("Lista de produtos vazia.")
+
+                        new_qtde = st.number_input(
+                            "Quantidade",
+                            min_value=1,
+                            value=1,
+                            key=f"new_qtde_{client}",
+                            label_visibility="collapsed",
+                        )
+
+                        if new_produto_label and st.button(
+                            "➕ Adicionar",
+                            key=f"add_item_{client}",
+                            use_container_width=True,
+                        ):
+                            produto = produtos_map.get(new_produto_label)
+                            if produto is None:
+                                st.error("❌ Produto invalido.")
+                            else:
+                                template = group_df.iloc[0].to_dict()
+                                novo_item = template.copy()
+                                novo_item["CódProImpakto"] = str(produto.get("productCode"))
+                                novo_item["Item"] = str(produto.get("name"))
+                                novo_item["Qtde"] = new_qtde
+                                novo_item["$ Unitário"] = parse_float(produto.get("price"))
+                                novo_item["$ Total"] = parse_float(produto.get("price")) * new_qtde
+                                novo_item["status"] = "aguardando"
+
+                                if "__doc_id" in novo_item:
+                                    del novo_item["__doc_id"]
+
+                                if firestore_enabled():
+                                    db = get_firestore_client()
+                                    db.collection(FIRESTORE_COLLECTION).add(novo_item)
+                                    sync_firestore_to_session()
+
+                                st.success("✅ Item adicionado!")
+                                st.rerun()
             
             st.write("")  # Spacing
 
