@@ -110,8 +110,6 @@ def render_login() -> bool:
             st.error("❌ Usuário ou senha incorretos!")
     
     st.divider()
-    st.caption("💡 Usuário padrão: **admin** | Senha: **admin123**")
-    st.caption("ℹ️ Configurar novos usuários na aba de Gerenciamento (após login com admin)")
 
 
 def log_audit(action: str, details: Dict) -> None:
