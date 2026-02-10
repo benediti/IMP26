@@ -1,0 +1,39 @@
+{
+  "project_info": {
+    "project_number": "257667471158",
+    "project_id": "projeto-compras-38769",
+    "storage_bucket": "projeto-compras-38769.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:257667471158:android:d406b4c2e83003847e8597",
+        "android_client_info": {
+          "package_name": "com.equippe.pedidomaterial"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "257667471158-hb4m7gi1g7nckp4g8vl6pb1do99g9nq8.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCS2p-V2fptFCQ1cuvX4yFb_-2-r59mTiI"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "257667471158-hb4m7gi1g7nckp4g8vl6pb1do99g9nq8.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

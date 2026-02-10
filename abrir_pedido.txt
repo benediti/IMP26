@@ -1,0 +1,224 @@
+Cod. Produto	Descr. Produto	Valor
+10132	Acucar refinado 1 kg uniao                	R$ 5.50
+20740	Agua sanitaria 1 l super candida                	R$ 3.89
+20746	Agua sanitaria 5 l facilita                	R$ 12.89
+20837	Alcool 70 desinfetante 1 l itaja                	R$ 6.95
+29163	Alcool gel 5 l x 4 kg para as maos ecofl                	R$ 39.90
+201593	Alcool gel 500 ml para as maos                	R$ 7.50
+60299	Alcool gel refil 800 ml all clean                	R$ 12.90
+30073	Aplicador de cera 35 cm sem cabo bralimp                	R$ 53.40
+31215	Aplicador universal graduado 500 ml tran                	R$ 4.80
+31261	Armacao mop po 40 cm ap400 bralimpia                	R$ 34.50
+31260	Armacao mop po 60 cm ap600 bralimpia                	R$ 36.62
+31145	Balde 11 l azul plastico                	R$ 6.99
+31169	Balde 15 l plastico                	R$ 9.90
+31167	Balde 20 l plastico                	R$ 13.95
+31176	Balde espremedor amarelo plastico nycar                	R$ 462.00
+31162	Balde espremedor azul plastico mopita ba                	R$ 49.65
+31214	Cabeleira mop agua cortada com rosca bra                	R$ 17.90
+31134	Cabeleira mop agua loop 350 rl branca br                	R$ 26.75
+30091	Cabo aluminio 1,40 m x 22 mm he 201 mop                	R$ 42.75
+30089	Cabo aluminio 1,40 m x 22 mm ce 140 com                	R$ 34.50
+32364	Cabo aluminio 1,40 m x 24 mm cl 140 liso                	R$ 31.29
+30090	Cabo aluminio 1,40 m x 22 mm cm 140 estr                	R$ 34.50
+31137	Cabo madeira 1,50 m plastificado                	R$ 3.99
+10742	Cafe vacuo 500 g tradicional pilao                	R$ 42.50
+75231	Cera acabamento acrilico 5 l incolor fla                	R$ 114.00
+31256	Combinado com cabo cb 250 25 cm bralimpi                	R$ 64.95
+21455	Desengraxante perfumado 5 l beck pine (3                	R$ 68.55
+22336	Desentupidor de pia                	R$ 2.99
+20710	Desentupidor wc com cabo                	R$ 3.95
+20829	Desincrustante louca sanitaria 750 ml re                	R$ 19.90
+20751	Desinfetante eucalipto 5 l gold                	R$ 22.95
+20752	Desinfetante floral 5 l gold                	R$ 22.95
+20763	Desinfetante floral 5 l max                	R$ 39.50
+29070	Desinfetante hospitalar 5 l clorex becke                	R$ 28.90
+20999	Desinfetante lavanda 5 l lavics azulim                	R$ 19.90
+20764	Desinfetante lavanda 5 l max                	R$ 39.50
+20771	Desinfetante lavanda 500 ml pinho sol                	R$ 9.95
+20821	Detergente clear 5 l ype                	R$ 27.50
+20739	Detergente clear 500 ml ype                	R$ 2.80
+20757	Detergente desincrustante 5 l multiplic                	R$ 103.00
+20765	Detergente neutro 5 l max                	R$ 46.30
+20800	Detergente neutro 500 ml limpol                	R$ 2.38
+20788	Detergente neutro 500 ml ype                	R$ 2.80
+31115	Disco limpador verde 350 mm british                	R$ 19.90
+31114	Disco limpador verde 440 mm british                	R$ 28.50
+31113	Disco limpador verde 510 mm british                	R$ 36.55
+31109	Disco lustrador branco 350 mm british                	R$ 19.95
+31160	Disco lustrador branco 510 mm british                	R$ 36.55
+31271	Disco removedor preto 350 mm british                	R$ 19.95
+31270	Disco removedor preto 440 mm british                	R$ 28.50
+31269	Disco removedor preto 510 mm british                	R$ 36.55
+170177	Dispenser poupa copo agua com botao e-dp                	R$ 45.90
+31268	Escova oval base madeira                	R$ 2.99
+31286	Escova sanitaria com pote ref 3607 odim                	R$ 11.90
+32168	Escova sanitaria com pote ref 6106 condo                	R$ 8.99
+31130	Escova sanitaria com pote ref 9143 betta                	R$ 14.90
+31059	Escova sanitaria plastica especial                	R$ 2.99
+31412	Escova sanitaria plastica redonda sem po                	R$ 3.95
+31124	Espanador eletrostatico ee 605 bralimpia                	R$ 29.75
+37000	Espanador n 30 pena nomo color 01 un sha                	R$ 14.90
+31068	Espanador n 50 pena nomo 01 un shangri-l                	R$ 38.85
+31120	Espanador nylon nomo shangri-la                	R$ 8.99
+31251	Esponja dupla face 01 pct x 10 un scotch                	R$ 11.80
+32165	Esponja dupla face anti aderente azul re                	R$ 1.69
+30105	Extensao telescopica 6 m 3 estagios ex 6                	R$ 162.90
+20347	Fibra fibraco scotch brite 3m                	R$ 1.99
+21315	Fibra limpeza macia british                	R$ 1.35
+21317	Fibra limpeza pesada british                	R$ 2.89
+21314	Fibra uso geral 100 x 260 mm verde briti                	R$ 1.45
+29410	Flanela 28 cm x 38 cm unitaria branca ca                	R$ 1.10
+21310	Flanela unitaria 28 x 38 branca saga                	R$ 1.10
+29408	Flanela 28 cm x 58 cm unitaria branca ca                	R$ 1.59
+21137	Flanela unitaria 28 x 58 branca saga                	R$ 1.59
+20785	Hipoclorito de sodio 5 l butterfly audax                	R$ 19.95
+32113	Kit reposicao vassoura feiticeira                	R$ 23.95
+37040	La de aco 01 pt x 8 un assolan                	R$ 2.29
+20832	Limpa carpete 5 l carpet plus becker (10                	R$ 58.30
+20716	Limpa carpete 500 ml karpex vanish                	R$ 29.90
+20994	Limpa pedras 5 l pedrex start                	R$ 44.85
+21934	Limpa vidro 500 ml trad. com alcool veja                	R$ 11.90
+21555	Limpador 5 l multiuso thames                	R$ 23.95
+20337	Limpador brilha inox 300 g / 400 ml scot                	R$ 41.90
+21248	Limpador festa flores bouquet 500 ml aja                	R$ 10.50
+21392	Limpador flores vermelhas & seducao 500                	R$ 5.99
+28979	Limpador flotador multiacao 5 l max                	R$ 48.60
+20745	Limpador fresh cloro 500 ml ajax                	R$ 11.95
+21312	Limpador fresh lemon 500 ml ajax                	R$ 10.96
+21309	Limpador geral concentrado 5 l max                	R$ 84.55
+21298	Limpador multiuso 5 l multiplic butterfl                	R$ 17.95
+21660	Limpador multiuso 500 ml gold veja promo                	R$ 6.15
+21687	Limpador multiuso 500 ml original azulim                	R$ 3.49
+21006	Lustra moveis 200 ml butterfly                	R$ 2.99
+20803	Lustra moveis 200 ml jasmin poliflor                	R$ 13.85
+20761	Lustra moveis lavanda 200 ml bravo johns                	R$ 15.00
+20805	Lustra moveis 200 ml lavanda destac                	R$ 11.90
+20806	Lustra moveis 200 ml lavanda poliflor                	R$ 11.85
+29121	Lustra moveis 500 ml lavanda destac prom                	R$ 18.90
+13374	Luva de latex com amido m 100 un inoven                	R$ 22.90
+20094	Luva plus media laranja latex ca 6110 sa                	R$ 7.99
+20089	Luva soft grande verde latex sanro                	R$ 5.99
+20088	Luva soft media verde latex ca 5129 sanr                	R$ 5.99
+20087	Luva soft pequena verde latex sanro                	R$ 5.99
+20085	Luva top grande amarela latex ca 40.044                	R$ 8.80
+20100	Luva top grande verde latex ca 40.045 sa                	R$ 8.80
+20084	Luva top media amarela latex ca 40.044 s                	R$ 8.80
+13546	Luva vinil sem amido g 100 un inoven                	R$ 18.90
+12189	Luva vinil sem amido g 100 un nobre                	R$ 18.90
+13618	Luva vinil sem amido m 100 un inoven                	R$ 18.90
+13332	Luva vinil sem amido m 100 un medix                	R$ 18.90
+12191	Luva vinil sem amido p 100 un nobre.                	R$ 18.90
+11579	Lysoform 1 l original johnson                	R$ 16.90
+21885	Lysoform 360 ml aerossol original johnso                	R$ 28.90
+13301	Mascara cirurgica tripla com elastico 50                	R$ 13.90
+31151	Mop po refil rp 400 40 cm bralimpia                	R$ 28.65
+31155	Mop po refil rp 600 60 cm bralimpia                	R$ 42.86
+11228	Oleo de peroba 100 ml                	R$ 12.90
+31935	Pa de lixo coletora plastica perfect pro                	R$ 24.90
+31287	Pa de lixo coletora plastica ref 158 odi                	R$ 38.90
+30094	Pa de lixo plastica formato l com cabo                	R$ 3.45
+30092	Pa de lixo plastica jeitosa bettanin                	R$ 19.90
+31216	Pa de lixo plastica ref. 15114 odim                	R$ 3.12
+120211	Palha de aco 20 un vieira n 2                	R$ 25.50
+37054	Pano de microfibra 40 cm x 60 cm azul 01                	R$ 14.50
+10552	Pano multiuso 5 un inoven                	R$ 0.00
+13222	Pano rolo 25 m x 28 cm azul 01 un inoven                	R$ 16.20
+11866	Pano rolo 300 m x 33 cm x 45 gr branco o                	R$ 287.50
+50295	Papel hig. folha dupla 64 rolos neve                	R$ 154.00
+50336	Papel hig. folha dupla 64 rolos personal                	R$ 103.00
+50313	Papel hig. kai-kai fl dupla 8000 fl impa                	R$ 108.00
+50318	Papel hig. rolao 300 m x 8 rolos impaper                	R$ 56.00
+50353	Papel hig. rolao fl dupla 250 m x 8 rolo                	R$ 89.90
+21099	Pastilha adesiva 3 un pato                	R$ 10.95
+29073	Pedra sanitaria lavanda harpic                	R$ 3.99
+140054	Placa cuidado piso molhado pl 2000 brali                	R$ 47.85
+170461	Porta higienico rolao branco su-rols04 i                	R$ 26.90
+170240	Porta saquinho para absorvente t-020724                	R$ 7.99
+170462	Porta toalha interfolha branco su-ints04                	R$ 26.90
+90107	Purificador de ar lavanda 360 ml bom ar                	R$ 16.90
+90103	Purificador de ar lavanda 360 ml glade                	R$ 16.90
+90105	Purificador de ar lembranca infancia 360                	R$ 16.90
+90097	Purificador de ar ultra fresh capim lima                	R$ 8.90
+30086	Raspador de seguranca 4 cm rv 040 bralim                	R$ 59.80
+31262	Refil de la para limpa vidros ll350 35 c                	R$ 13.80
+29044	Removedor 900 ml gitanes                	R$ 15.46
+20768	Removedor de cera 5 l remotion audax                	R$ 92.30
+31290	Rodo plastico duplo 40 cm cabo 1,20 m x                	R$ 12.50
+31738	Rodo plastico duplo 45 cm push com cabo                	R$ 28.85
+31217	Rodo plastico duplo 60 cm sem cabo                	R$ 5.26
+32162	Rodo plastico multiuso 40 cm com cabo re                	R$ 16.90
+29183	Sabao em pedra 180 g glicerinado ype                	R$ 3.39
+29133	Sabao em pedra 200 g conde                	R$ 2.29
+29378	Sabao em pedra 5 un x 160 g glicerinado                	R$ 16.95
+29203	Sabao em po 800 g caixinha tyxan                	R$ 15.45
+69916	Sabonete liq. erva doce 5 l soft plus t-                	R$ 24.80
+60466	Sabonete liq. por do sol 5 l all clean                	R$ 28.00
+60318	Sabonete refil erva doce 800 ml t-p800ed                	R$ 11.95
+170439	Saboneteira montana bca com reservatorio                	R$ 33.80
+170463	Saboneteira para refil su-16sab impakto                	R$ 23.30
+31070	Saco alvejado grande especial ref. 1050                	R$ 6.80
+31066	Saco alvejado grande un                	R$ 4.39
+32254	Saco alvejado grande un diamante                	R$ 4.39
+30155	Saco alvejado xadrez un                	R$ 3.50
+44442	Saco coletor para carro america amarelo                	R$ 89.90
+41640	Saco de lixo 100 l amarelo                	R$ 51.60
+40265	Saco de lixo 100 l azul                	R$ 46.97
+41616	Saco de lixo 100 l marrom                	R$ 51.60
+40361	Saco de lixo 100 l preto especial                	R$ 111.83
+40356	Saco de lixo 100 l preto p.20                	R$ 51.60
+40157	Saco de lixo 100 l transparente colibri                	R$ 38.90
+41266	Saco de lixo 100 l transparente kubera                	R$ 48.00
+41581	Saco de lixo 100 l verde                	R$ 46.19
+41250	Saco de lixo 100 l vermelho                	R$ 51.60
+41580	Saco de lixo 20 l amarelo                	R$ 15.51
+41638	Saco de lixo 20 l azul                	R$ 17.95
+41625	Saco de lixo 20 l preto especial                	R$ 21.00
+40040	Saco de lixo 20 l preto i.t                	R$ 12.90
+40173	Saco de lixo 20 l transparente                	R$ 15.00
+41575	Saco de lixo 20 l verde                	R$ 15.51
+41599	Saco de lixo 20 l vermelho                	R$ 18.00
+41235	Saco de lixo 200 l preto comum                	R$ 58.00
+41622	Saco de lixo 200 l preto reforcado                	R$ 86.83
+41635	Saco de lixo 200 l transparente colibri                	R$ 36.84
+41602	Saco de lixo 40 l azul                	R$ 22.87
+41624	Saco de lixo 40 l preto especial                	R$ 27.00
+40041	Saco de lixo 40 l preto i.t                	R$ 21.00
+40107	Saco de lixo 40 l transparente colibri                	R$ 16.00
+44452	Saco de lixo 40 l verde                	R$ 25.00
+41600	Saco de lixo 40 l vermelho                	R$ 22.90
+41579	Saco de lixo 60 l amarelo                	R$ 33.00
+41601	Saco de lixo 60 l azul                	R$ 33.00
+41574	Saco de lixo 60 l cinza                	R$ 33.00
+41573	Saco de lixo 60 l marrom                	R$ 33.00
+41623	Saco de lixo 60 l preto especial                	R$ 32.00
+40042	Saco de lixo 60 l preto i.t                	R$ 28.00
+41641	Saco de lixo 60 l transparente colibri                	R$ 28.00
+40312	Saco de lixo 60 l transparente reforcado                	R$ 45.00
+41576	Saco de lixo 60 l verde                	R$ 30.29
+41606	Saco de lixo 60 l vermelho                	R$ 30.61
+41990	Saco leitoso 100 l infectante embalacfle                	R$ 39.00
+41987	Saco leitoso 15 l infectante embalacflex                	R$ 16.50
+41988	Saco leitoso 30 l infectante embalacflex                	R$ 16.50
+41989	Saco leitoso 50 l infectante embalacflex                	R$ 27.50
+41637	Saco para aspirador mod a 20 3 un ref. 1                	R$ 15.75
+21294	Saponaceo cremoso 300 ml facilita                	R$ 3.99
+20073	Saponaceo cremoso classico 250 ml radium                	R$ 8.85
+29066	Saponaceo cremoso limao 250 ml radium                	R$ 8.85
+31264	Suporte lt com rosca azul sr 300 bralimp                	R$ 14.20
+30023	Suporte protetor de assento 01 unidade s                	R$ 32.90
+50343	Toalha 2 db 20 cm x 20 cm branco 1000 fl                	R$ 13.96
+50347	Toalha 2 db 20 cm x 20 cm branco paper m                	R$ 9.59
+50126	Toalha 2 db 20 cm x 21 cm 100% embalagem                	R$ 9.59
+50348	Toalha 2 db 22 cm x 20 cm branco 2000 fl                	R$ 33.90
+50419	Toalha 2 db f.dupla 21,5 cm x 22,2 cm bc                	R$ 169.90
+50337	Toalha 2 db f.dupla 22 cm x 20 cm bco 20                	R$ 64.90
+10137	Touca descartavel tnt 100 un                	R$ 16.90
+20962	Vaselina liquida comum 1 l                	R$ 21.30
+31127	Vassoura de teto cabo madeira 2 m                	R$ 15.94
+32089	Vassoura magica varredora feiticeira lim                	R$ 105.90
+31132	Vassoura multiuso com cabo azul ref 9673                	R$ 18.90
+30136	Vassoura multiuso com cabo fiory shangri                	R$ 11.50
+31226	Vassoura nylon n. 5 sem cabo                	R$ 8.50
+31223	Vassoura piacava n. 5 sem cabo                	R$ 8.99
+31221	Vassoura tipo novica sem cabo                	R$ 4.50
