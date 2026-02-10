@@ -1044,7 +1044,7 @@ def render_aguardando_tab() -> None:
     for client, group_df in by_client:
         # Create card container
         with st.container(border=True):
-            col1, col2, col3, col4 = st.columns([2, 1.5, 1, 1])
+            col1, col2, col3, col4, col5 = st.columns([2, 1.5, 1, 1, 1])
             
             # Client info
             with col1:
@@ -1057,6 +1057,10 @@ def render_aguardando_tab() -> None:
             
             # Buttons
             with col3:
+                if st.button("✏️", key=f"edit_{client}", help="Alterar"):
+                    st.session_state.edit_client = client
+
+            with col4:
                 if st.button(f"✅", key=f"approve_{client}", help="Aprovar"):
                     if firestore_enabled():
                         db = get_firestore_client()
@@ -1083,7 +1087,7 @@ def render_aguardando_tab() -> None:
                     st.success(f"✅ Pedido de {client} aprovado! (Usuário: {st.session_state.get('current_user', 'unknown')})")
                     st.rerun()
             
-            with col4:
+            with col5:
                 if st.button(f"❌", key=f"reject_{client}", help="Rejeitar"):
                     if firestore_enabled():
                         db = get_firestore_client()
@@ -1110,7 +1114,82 @@ def render_aguardando_tab() -> None:
             st.dataframe(items_display, use_container_width=True, hide_index=True)
             
             # Edit section
-            with st.expander("✏️ Editar pedido", expanded=False):
+            is_expanded = st.session_state.get("edit_client") == client
+            with st.expander("✏️ Editar pedido", expanded=is_expanded):
+                st.write("**Itens atuais (editar):**")
+                editor_source = group_df[["CódProImpakto", "Item", "Qtde", "__doc_id"]].copy()
+                editor_source["Produto"] = editor_source.apply(
+                    lambda row: f"{row['CódProImpakto']} - {row['Item']}", axis=1
+                )
+                editor_display = editor_source[["Produto", "Qtde"]].reset_index(drop=True)
+                doc_ids = editor_source["__doc_id"].tolist()
+
+                produtos_df = st.session_state.excel_data.get("Produtos", pd.DataFrame())
+                produtos_df = produtos_df.copy()
+                if not produtos_df.empty:
+                    produtos_df["price"] = pd.to_numeric(
+                        produtos_df.get("price"), errors="coerce"
+                    ).fillna(0.0)
+                    produtos_df["label"] = produtos_df.apply(
+                        lambda row: f"{row['productCode']} - {row['name']}", axis=1
+                    )
+                    produto_options = produtos_df["label"].tolist()
+                    produtos_map = {
+                        row["label"]: row for _, row in produtos_df.iterrows()
+                    }
+                else:
+                    produto_options = []
+                    produtos_map = {}
+
+                if produto_options:
+                    produto_column = st.column_config.SelectboxColumn(
+                        "Produto",
+                        options=produto_options,
+                        required=True,
+                    )
+                else:
+                    produto_column = st.column_config.TextColumn("Produto")
+
+                edited_df = st.data_editor(
+                    editor_display,
+                    column_config={
+                        "Produto": produto_column,
+                        "Qtde": st.column_config.NumberColumn(
+                            "Qtde",
+                            min_value=1,
+                            step=1,
+                        ),
+                    },
+                    hide_index=True,
+                    use_container_width=True,
+                    key=f"editor_{client}",
+                )
+
+                if st.button("💾 Salvar alterações", key=f"save_edit_{client}"):
+                    if firestore_enabled():
+                        db = get_firestore_client()
+                        for row_idx, row in edited_df.iterrows():
+                            doc_id = doc_ids[row_idx]
+                            label = row.get("Produto")
+                            qtde = parse_int(row.get("Qtde"))
+                            produto = produtos_map.get(label)
+                            if not produto:
+                                continue
+                            preco = parse_float(produto.get("price"))
+                            codigo = str(produto.get("productCode"))
+                            nome = str(produto.get("name"))
+                            db.collection(FIRESTORE_COLLECTION).document(doc_id).update({
+                                "CódProImpakto": codigo,
+                                "Item": nome,
+                                "Qtde": qtde,
+                                "$ Unitário": preco,
+                                "$ Total": preco * qtde,
+                                "updated_at": firestore.SERVER_TIMESTAMP,
+                            })
+                        sync_firestore_to_session()
+                    st.success("✅ Alterações salvas!")
+                    st.rerun()
+
                 st.write("**Remover itens:**")
                 items_to_remove = st.multiselect(
                     "Selecione itens para remover",
@@ -1135,19 +1214,44 @@ def render_aguardando_tab() -> None:
                 
                 st.write("**Adicionar itens:**")
                 col_prod, col_qtde = st.columns(2)
-                
+
                 with col_prod:
-                    produtos_list = st.session_state.excel_data.get("Produtos", pd.DataFrame())
+                    produtos_list = st.session_state.excel_data.get("Produtos", pd.DataFrame()).copy()
+                    new_produto_label = None
+                    produtos_map = {}
                     if not produtos_list.empty:
-                        new_produto = st.selectbox(
-                            "Produto",
-                            produtos_list["name"].tolist() if "name" in produtos_list.columns else [],
-                            key=f"new_produto_{client}",
-                            label_visibility="collapsed"
+                        produtos_list["price"] = pd.to_numeric(
+                            produtos_list.get("price"), errors="coerce"
+                        ).fillna(0.0)
+                        produtos_list["label"] = produtos_list.apply(
+                            lambda row: f"{row['productCode']} - {row['name']}", axis=1
                         )
+                        produtos_map = {
+                            row["label"]: row for _, row in produtos_list.iterrows()
+                        }
+                        busca = st.text_input(
+                            "Buscar produto (codigo ou nome)",
+                            key=f"search_add_{client}",
+                            label_visibility="collapsed",
+                        )
+                        if busca:
+                            busca_lower = busca.lower()
+                            produtos_list = produtos_list[
+                                produtos_list["name"].astype(str).str.lower().str.contains(busca_lower)
+                                | produtos_list["productCode"].astype(str).str.lower().str.contains(busca_lower)
+                            ]
+                        if not produtos_list.empty:
+                            new_produto_label = st.selectbox(
+                                "Produto",
+                                produtos_list["label"].tolist(),
+                                key=f"new_produto_{client}",
+                                label_visibility="collapsed",
+                            )
+                        else:
+                            st.info("Nenhum produto encontrado com esse filtro.")
                     else:
-                        new_produto = None
-                
+                        st.warning("Lista de produtos vazia.")
+
                 with col_qtde:
                     new_qtde = st.number_input(
                         "Quantidade",
@@ -1156,24 +1260,31 @@ def render_aguardando_tab() -> None:
                         key=f"new_qtde_{client}",
                         label_visibility="collapsed"
                     )
-                
-                if new_produto and st.button(f"➕ Adicionar", key=f"add_item_{client}"):
-                    template = group_df.iloc[0].to_dict()
-                    novo_item = template.copy()
-                    novo_item["Item"] = new_produto
-                    novo_item["Qtde"] = new_qtde
-                    novo_item["status"] = "aguardando"
-                    
-                    if "__doc_id" in novo_item:
-                        del novo_item["__doc_id"]
-                    
-                    if firestore_enabled():
-                        db = get_firestore_client()
-                        db.collection(FIRESTORE_COLLECTION).add(novo_item)
-                        sync_firestore_to_session()
-                    
-                    st.success("✅ Item adicionado!")
-                    st.rerun()
+
+                if new_produto_label and st.button(f"➕ Adicionar", key=f"add_item_{client}"):
+                    produto = produtos_map.get(new_produto_label)
+                    if produto is None:
+                        st.error("❌ Produto inválido.")
+                    else:
+                        template = group_df.iloc[0].to_dict()
+                        novo_item = template.copy()
+                        novo_item["CódProImpakto"] = str(produto.get("productCode"))
+                        novo_item["Item"] = str(produto.get("name"))
+                        novo_item["Qtde"] = new_qtde
+                        novo_item["$ Unitário"] = parse_float(produto.get("price"))
+                        novo_item["$ Total"] = parse_float(produto.get("price")) * new_qtde
+                        novo_item["status"] = "aguardando"
+
+                        if "__doc_id" in novo_item:
+                            del novo_item["__doc_id"]
+
+                        if firestore_enabled():
+                            db = get_firestore_client()
+                            db.collection(FIRESTORE_COLLECTION).add(novo_item)
+                            sync_firestore_to_session()
+
+                        st.success("✅ Item adicionado!")
+                        st.rerun()
             
             st.write("")  # Spacing
 
