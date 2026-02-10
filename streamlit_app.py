@@ -1116,7 +1116,9 @@ def render_aguardando_tab() -> None:
             # Edit section
             is_expanded = st.session_state.get("edit_client") == client
             with st.expander("✏️ Editar pedido", expanded=is_expanded):
-                st.write("**Itens atuais (editar):**")
+                st.markdown("**Itens atuais (editar):**")
+                st.caption("Edite o produto e a quantidade e clique em salvar.")
+
                 editor_source = group_df[["CódProImpakto", "Item", "Qtde", "__doc_id"]].copy()
                 editor_source["Produto"] = editor_source.apply(
                     lambda row: f"{row['CódProImpakto']} - {row['Item']}", axis=1
@@ -1124,8 +1126,7 @@ def render_aguardando_tab() -> None:
                 editor_display = editor_source[["Produto", "Qtde"]].reset_index(drop=True)
                 doc_ids = editor_source["__doc_id"].tolist()
 
-                produtos_df = st.session_state.excel_data.get("Produtos", pd.DataFrame())
-                produtos_df = produtos_df.copy()
+                produtos_df = st.session_state.excel_data.get("Produtos", pd.DataFrame()).copy()
                 if not produtos_df.empty:
                     produtos_df["price"] = pd.to_numeric(
                         produtos_df.get("price"), errors="coerce"
@@ -1165,7 +1166,7 @@ def render_aguardando_tab() -> None:
                     key=f"editor_{client}",
                 )
 
-                if st.button("💾 Salvar alterações", key=f"save_edit_{client}"):
+                if st.button("💾 Salvar alteracoes", key=f"save_edit_{client}"):
                     if firestore_enabled():
                         db = get_firestore_client()
                         for row_idx, row in edited_df.iterrows():
@@ -1187,35 +1188,38 @@ def render_aguardando_tab() -> None:
                                 "updated_at": firestore.SERVER_TIMESTAMP,
                             })
                         sync_firestore_to_session()
-                    st.success("✅ Alterações salvas!")
+                    st.success("✅ Alteracoes salvas!")
                     st.rerun()
 
-                st.write("**Remover itens:**")
-                items_to_remove = st.multiselect(
-                    "Selecione itens para remover",
-                    group_df.index,
-                    format_func=lambda idx: f"🗑️ {df.loc[idx, 'Item']} (Qtde: {df.loc[idx, 'Qtde']})",
-                    key=f"remove_{client}",
-                    label_visibility="collapsed"
-                )
-                
-                if items_to_remove:
-                    col1_e, col2_e = st.columns(2)
-                    with col1_e:
-                        if st.button(f"🗑️ Remover selecionados", key=f"confirm_remove_{client}"):
-                            if firestore_enabled():
-                                db = get_firestore_client()
-                                for idx in items_to_remove:
-                                    doc_id = df.loc[idx, "__doc_id"]
-                                    db.collection(FIRESTORE_COLLECTION).document(doc_id).delete()
-                                sync_firestore_to_session()
-                            st.success("✅ Itens removidos!")
-                            st.rerun()
-                
-                st.write("**Adicionar itens:**")
-                col_prod, col_qtde = st.columns(2)
+                st.divider()
 
-                with col_prod:
+                col_remove, col_add = st.columns([1, 1])
+                with col_remove:
+                    st.markdown("**Remover itens:**")
+                    items_to_remove = st.multiselect(
+                        "Selecione itens para remover",
+                        group_df.index,
+                        format_func=lambda idx: f"🗑️ {df.loc[idx, 'Item']} (Qtde: {df.loc[idx, 'Qtde']})",
+                        key=f"remove_{client}",
+                        label_visibility="collapsed",
+                    )
+
+                    if items_to_remove and st.button(
+                        "🗑️ Remover selecionados",
+                        key=f"confirm_remove_{client}",
+                        use_container_width=True,
+                    ):
+                        if firestore_enabled():
+                            db = get_firestore_client()
+                            for idx in items_to_remove:
+                                doc_id = df.loc[idx, "__doc_id"]
+                                db.collection(FIRESTORE_COLLECTION).document(doc_id).delete()
+                            sync_firestore_to_session()
+                        st.success("✅ Itens removidos!")
+                        st.rerun()
+
+                with col_add:
+                    st.markdown("**Adicionar itens:**")
                     produtos_list = st.session_state.excel_data.get("Produtos", pd.DataFrame()).copy()
                     new_produto_label = None
                     produtos_map = {}
@@ -1252,39 +1256,42 @@ def render_aguardando_tab() -> None:
                     else:
                         st.warning("Lista de produtos vazia.")
 
-                with col_qtde:
                     new_qtde = st.number_input(
                         "Quantidade",
                         min_value=1,
                         value=1,
                         key=f"new_qtde_{client}",
-                        label_visibility="collapsed"
+                        label_visibility="collapsed",
                     )
 
-                if new_produto_label and st.button(f"➕ Adicionar", key=f"add_item_{client}"):
-                    produto = produtos_map.get(new_produto_label)
-                    if produto is None:
-                        st.error("❌ Produto inválido.")
-                    else:
-                        template = group_df.iloc[0].to_dict()
-                        novo_item = template.copy()
-                        novo_item["CódProImpakto"] = str(produto.get("productCode"))
-                        novo_item["Item"] = str(produto.get("name"))
-                        novo_item["Qtde"] = new_qtde
-                        novo_item["$ Unitário"] = parse_float(produto.get("price"))
-                        novo_item["$ Total"] = parse_float(produto.get("price")) * new_qtde
-                        novo_item["status"] = "aguardando"
+                    if new_produto_label and st.button(
+                        "➕ Adicionar",
+                        key=f"add_item_{client}",
+                        use_container_width=True,
+                    ):
+                        produto = produtos_map.get(new_produto_label)
+                        if produto is None:
+                            st.error("❌ Produto invalido.")
+                        else:
+                            template = group_df.iloc[0].to_dict()
+                            novo_item = template.copy()
+                            novo_item["CódProImpakto"] = str(produto.get("productCode"))
+                            novo_item["Item"] = str(produto.get("name"))
+                            novo_item["Qtde"] = new_qtde
+                            novo_item["$ Unitário"] = parse_float(produto.get("price"))
+                            novo_item["$ Total"] = parse_float(produto.get("price")) * new_qtde
+                            novo_item["status"] = "aguardando"
 
-                        if "__doc_id" in novo_item:
-                            del novo_item["__doc_id"]
+                            if "__doc_id" in novo_item:
+                                del novo_item["__doc_id"]
 
-                        if firestore_enabled():
-                            db = get_firestore_client()
-                            db.collection(FIRESTORE_COLLECTION).add(novo_item)
-                            sync_firestore_to_session()
+                            if firestore_enabled():
+                                db = get_firestore_client()
+                                db.collection(FIRESTORE_COLLECTION).add(novo_item)
+                                sync_firestore_to_session()
 
-                        st.success("✅ Item adicionado!")
-                        st.rerun()
+                            st.success("✅ Item adicionado!")
+                            st.rerun()
             
             st.write("")  # Spacing
 
