@@ -126,7 +126,9 @@ def get_firestore_client():
 
     if not firebase_admin._apps:
         cred = credentials.Certificate(cred_dict)
-        firebase_admin.initialize_app(cred)
+        firebase_admin.initialize_app(cred, {
+            'storageBucket': FIRESTORE_PDF_BUCKET
+        })
 
     client = firestore.client()
     st.session_state.firestore_client = client
@@ -179,14 +181,24 @@ def sync_firestore_to_session() -> None:
 def upload_pdf_to_storage(pdf_buffer: io.BytesIO, client_name: str) -> Optional[str]:
     """Upload PDF to Firestore Storage and return the path."""
     try:
+        # Get Firebase Admin SDK instance
+        if not firebase_admin._apps:
+            get_firestore_client()  # Initialize if needed
+        
         bucket = storage.bucket(FIRESTORE_PDF_BUCKET)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         pdf_name = f"previews/{client_name.replace(' ', '_')}_PREVIA_{timestamp}.pdf"
         blob = bucket.blob(pdf_name)
-        blob.upload_from_string(pdf_buffer.getvalue(), content_type="application/pdf")
+        
+        # Upload PDF
+        blob.upload_from_string(
+            pdf_buffer.getvalue(), 
+            content_type="application/pdf"
+        )
+        st.success(f"✅ PDF salvo em Storage: {pdf_name}")
         return pdf_name
     except Exception as exc:
-        st.error(f"Erro ao salvar PDF: {exc}")
+        st.error(f"Erro ao salvar PDF no Storage: {exc}")
         return None
 
 
