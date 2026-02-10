@@ -6,6 +6,7 @@ from typing import Dict, List, Optional
 
 import pandas as pd
 import streamlit as st
+import bcrypt
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from reportlab.lib.pagesizes import A4
@@ -20,6 +21,7 @@ FIRESTORE_PRODUCTS_COLLECTION = "produtos"
 FIRESTORE_SETORES_COLLECTION = "setores"
 FIRESTORE_PDF_BUCKET = "material-basico"
 FIRESTORE_AUDIT_COLLECTION = "audit_trail"
+FIRESTORE_USERS_COLLECTION = "users"
 APP_PASSWORD = os.getenv("APP_PASSWORD", "admin123")  # Default for testing
 SESSION_DEFAULTS = {
     "excel_data": None,
@@ -65,6 +67,9 @@ def init_session_state() -> None:
     for key, value in SESSION_DEFAULTS.items():
         st.session_state.setdefault(key, value)
     
+    # Ensure admin user exists on first run
+    ensure_admin_user()
+    
     # Auto-load from Firestore on first run
     if st.session_state.excel_data is None and firestore_enabled():
         sync_firestore_to_session()
@@ -84,7 +89,7 @@ def check_authentication() -> bool:
 
 
 def render_login() -> bool:
-    """Render login page."""
+    """Render login page with Firestore user validation."""
     st.set_page_config(page_title="Sistema de Gestão - Login", layout="centered")
     st.markdown("# 🔐 Login - Sistema de Gestão de Pedidos")
     st.divider()
@@ -96,16 +101,17 @@ def render_login() -> bool:
         password = st.text_input("🔑 Senha", type="password")
     
     if st.button("Entrar", use_container_width=True):
-        if password == APP_PASSWORD:
+        if validate_user_credentials(username, password):
             st.session_state.authenticated = True
             st.session_state.current_user = username if username else "Usuario"
             st.success(f"✅ Bem-vindo, {st.session_state.current_user}!")
             st.rerun()
         else:
-            st.error("❌ Senha incorreta!")
+            st.error("❌ Usuário ou senha incorretos!")
     
     st.divider()
-    st.caption("💡 Senha padrão: **admin123** (configure com variável `APP_PASSWORD`)")
+    st.caption("💡 Usuário padrão: **admin** | Senha: **admin123**")
+    st.caption("ℹ️ Configurar novos usuários na aba de Gerenciamento (após login com admin)")
 
 
 def log_audit(action: str, details: Dict) -> None:
@@ -135,6 +141,164 @@ def compare_orders(original: Dict, modified: Dict) -> Dict:
         if orig_val != mod_val:
             changes[key] = {"de": orig_val, "para": mod_val}
     return changes
+
+
+# ============================================================================
+# USER MANAGEMENT FUNCTIONS
+# ============================================================================
+
+
+def hash_password(password: str) -> str:
+    """Hash a password using bcrypt."""
+    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+
+def verify_password(password: str, hashed: str) -> bool:
+    """Verify a password against its hash."""
+    try:
+        return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
+    except Exception:
+        return False
+
+
+def get_users_list() -> List[Dict]:
+    """Fetch all users from Firestore."""
+    if not firestore_enabled():
+        return []
+    
+    try:
+        db = get_firestore_client()
+        users = []
+        for doc in db.collection(FIRESTORE_USERS_COLLECTION).stream():
+            user_data = doc.to_dict()
+            user_data["username"] = doc.id
+            users.append(user_data)
+        return users
+    except Exception as e:
+        st.warning(f"⚠️ Erro ao carregar usuários: {e}")
+        return []
+
+
+def validate_user_credentials(username: str, password: str) -> bool:
+    """Validate user credentials against Firestore users collection."""
+    if not firestore_enabled():
+        # Offline mode: allow with default password
+        return password == APP_PASSWORD
+    
+    if not username or not password:
+        return False
+    
+    try:
+        db = get_firestore_client()
+        doc = db.collection(FIRESTORE_USERS_COLLECTION).document(username).get()
+        
+        if not doc.exists:
+            return False
+        
+        user_data = doc.to_dict()
+        password_hash = user_data.get("password_hash", "")
+        
+        return verify_password(password, password_hash)
+    except Exception as e:
+        st.warning(f"⚠️ Erro ao validar credenciais: {e}")
+        return False
+
+
+def create_user(username: str, password: str, role: str = "user") -> bool:
+    """Create a new user in Firestore."""
+    if not firestore_enabled():
+        st.error("❌ Firestore não disponível para criar usuários.")
+        return False
+    
+    if not username or not password:
+        st.error("❌ Usuário e senha são obrigatórios.")
+        return False
+    
+    try:
+        db = get_firestore_client()
+        
+        # Check if user already exists
+        doc = db.collection(FIRESTORE_USERS_COLLECTION).document(username).get()
+        if doc.exists:
+            st.error(f"❌ Usuário '{username}' já existe.")
+            return False
+        
+        # Create user
+        user_data = {
+            "password_hash": hash_password(password),
+            "role": role,
+            "created_at": firestore.SERVER_TIMESTAMP,
+            "updated_at": firestore.SERVER_TIMESTAMP,
+        }
+        db.collection(FIRESTORE_USERS_COLLECTION).document(username).set(user_data)
+        st.success(f"✅ Usuário '{username}' criado com sucesso!")
+        log_audit("create_user", {"username": username, "role": role})
+        return True
+    except Exception as e:
+        st.error(f"❌ Erro ao criar usuário: {e}")
+        return False
+
+
+def delete_user(username: str) -> bool:
+    """Delete a user from Firestore."""
+    if not firestore_enabled():
+        st.error("❌ Firestore não disponível.")
+        return False
+    
+    try:
+        db = get_firestore_client()
+        db.collection(FIRESTORE_USERS_COLLECTION).document(username).delete()
+        st.success(f"✅ Usuário '{username}' deletado com sucesso!")
+        log_audit("delete_user", {"username": username})
+        return True
+    except Exception as e:
+        st.error(f"❌ Erro ao deletar usuário: {e}")
+        return False
+
+
+def update_user_password(username: str, new_password: str) -> bool:
+    """Update a user's password."""
+    if not firestore_enabled():
+        st.error("❌ Firestore não disponível.")
+        return False
+    
+    if not new_password:
+        st.error("❌ Nova senha é obrigatória.")
+        return False
+    
+    try:
+        db = get_firestore_client()
+        db.collection(FIRESTORE_USERS_COLLECTION).document(username).update({
+            "password_hash": hash_password(new_password),
+            "updated_at": firestore.SERVER_TIMESTAMP,
+        })
+        st.success(f"✅ Senha do usuário '{username}' atualizada com sucesso!")
+        log_audit("update_user_password", {"username": username})
+        return True
+    except Exception as e:
+        st.error(f"❌ Erro ao atualizar senha: {e}")
+        return False
+
+
+def ensure_admin_user():
+    """Ensure admin user exists in Firestore on first run."""
+    if not firestore_enabled():
+        return
+    
+    try:
+        db = get_firestore_client()
+        doc = db.collection(FIRESTORE_USERS_COLLECTION).document("admin").get()
+        
+        if not doc.exists:
+            admin_data = {
+                "password_hash": hash_password("admin123"),
+                "role": "admin",
+                "created_at": firestore.SERVER_TIMESTAMP,
+                "updated_at": firestore.SERVER_TIMESTAMP,
+            }
+            db.collection(FIRESTORE_USERS_COLLECTION).document("admin").set(admin_data)
+    except Exception as e:
+        st.warning(f"⚠️ Erro ao garantir usuário admin: {e}")
 
 
 def ensure_columns(df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
@@ -1125,6 +1289,87 @@ def render_approved_orders_tab() -> None:
         st.error(f"❌ Erro ao carregar pedidos aprovados: {e}")
 
 
+def render_user_management_tab() -> None:
+    """Admin interface for user management."""
+    st.subheader("👥 Gerenciamento de Usuários")
+    
+    # Check if current user is admin
+    if st.session_state.get("current_user") != "admin":
+        st.warning("⚠️ Apenas admins podem gerenciar usuários.")
+        return
+    
+    # Tab: Create, List, Edit
+    tab_create, tab_list, tab_edit = st.tabs(["➕ Criar Usuário", "📋 Listar Usuários", "✏️ Editar Usuário"])
+    
+    # TAB 1: Create User
+    with tab_create:
+        st.markdown("#### Criar Novo Usuário")
+        col1, col2 = st.columns([1, 1])
+        
+        with col1:
+            new_username = st.text_input("👤 Nome de usuário")
+        with col2:
+            new_role = st.selectbox("📌 Função", ["user", "admin"])
+        
+        new_password = st.text_input("🔑 Senha", type="password")
+        confirm_password = st.text_input("🔑 Confirmar Senha", type="password")
+        
+        if st.button("✅ Criar Usuário", use_container_width=True):
+            if not new_username or not new_password:
+                st.error("❌ Usuário e senha são obrigatórios.")
+            elif new_password != confirm_password:
+                st.error("❌ As senhas não correspondem.")
+            else:
+                if create_user(new_username, new_password, new_role):
+                    st.balloons()
+    
+    # TAB 2: List Users
+    with tab_list:
+        st.markdown("#### Lista de Usuários")
+        users = get_users_list()
+        
+        if not users:
+            st.info("ℹ️ Nenhum usuário cadastrado.")
+        else:
+            users_df = pd.DataFrame(users)
+            users_df = users_df[["username", "role", "created_at", "updated_at"]]
+            st.dataframe(users_df, use_container_width=True, hide_index=True)
+    
+    # TAB 3: Edit User
+    with tab_edit:
+        st.markdown("#### Editar Usuário")
+        users = get_users_list()
+        
+        if not users:
+            st.info("ℹ️ Nenhum usuário para editar.")
+        else:
+            usernames = [u["username"] for u in users]
+            selected_user = st.selectbox("👤 Selecione usuário", usernames)
+            
+            col1, col2, col3 = st.columns([1, 1, 1])
+            
+            with col1:
+                if st.button("🔑 Redefinir Senha", use_container_width=True):
+                    new_pwd = st.text_input("Nova Senha", type="password", key="reset_pwd")
+                    confirm_pwd = st.text_input("Confirmar Senha", type="password", key="confirm_pwd")
+                    
+                    if st.button("✅ Atualizar Senha"):
+                        if new_pwd != confirm_pwd:
+                            st.error("❌ Senhas não correspondem.")
+                        else:
+                            update_user_password(selected_user, new_pwd)
+            
+            with col2:
+                if st.button("🗑️ Deletar Usuário", use_container_width=True):
+                    if st.warning(f"⚠️ Tem certeza que quer deletar '{selected_user}'?"):
+                        if st.button("✅ Confirmar Deleção"):
+                            delete_user(selected_user)
+                            st.rerun()
+            
+            with col3:
+                st.write("")  # Placeholder for alignment
+
+
 def main() -> None:
     st.set_page_config(page_title="Sistema de Gestão de Pedidos", layout="wide")
     init_session_state()
@@ -1149,13 +1394,31 @@ def main() -> None:
     if st.session_state.excel_data is None:
         st.stop()
 
-    tab_novo, tab_aguardando, tab_aprovados = st.tabs(["Novo Pedido", "Aguardando Aprovação", "📋 Pedidos Aprovados"])
+    # Create tabs based on user role
+    if st.session_state.get("current_user") == "admin":
+        tab_novo, tab_aguardando, tab_aprovados, tab_usuarios = st.tabs([
+            "Novo Pedido", 
+            "Aguardando Aprovação", 
+            "📋 Pedidos Aprovados",
+            "👥 Gerenciar Usuários"
+        ])
+    else:
+        tab_novo, tab_aguardando, tab_aprovados = st.tabs([
+            "Novo Pedido", 
+            "Aguardando Aprovação", 
+            "📋 Pedidos Aprovados"
+        ])
+    
     with tab_novo:
         render_new_order_tab()
     with tab_aguardando:
         render_aguardando_tab()
     with tab_aprovados:
         render_approved_orders_tab()
+    
+    if st.session_state.get("current_user") == "admin":
+        with tab_usuarios:
+            render_user_management_tab()
 
     render_download_section()
 
