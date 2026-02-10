@@ -18,7 +18,7 @@ COD_CLIENTE_IMPAKTO = 208831
 FIRESTORE_COLLECTION = "pedido_itens"
 FIRESTORE_PRODUCTS_COLLECTION = "produtos"
 FIRESTORE_SETORES_COLLECTION = "setores"
-FIRESTORE_PDF_BUCKET = "material-basico.appspot.com"
+FIRESTORE_PDF_BUCKET = "material-basico"
 SESSION_DEFAULTS = {
     "excel_data": None,
     "excel_source": "",
