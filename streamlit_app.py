@@ -11,13 +11,14 @@ from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
-from firebase_admin import credentials, firestore
+from firebase_admin import credentials, firestore, storage
 import firebase_admin
 
 COD_CLIENTE_IMPAKTO = 208831
 FIRESTORE_COLLECTION = "pedido_itens"
 FIRESTORE_PRODUCTS_COLLECTION = "produtos"
 FIRESTORE_SETORES_COLLECTION = "setores"
+FIRESTORE_PDF_BUCKET = "material-basico.appspot.com"
 SESSION_DEFAULTS = {
     "excel_data": None,
     "excel_source": "",
@@ -175,10 +176,31 @@ def sync_firestore_to_session() -> None:
     sync_firestore_reference_data()
 
 
-def save_rows_to_firestore(linhas: pd.DataFrame, status: str) -> None:
+def upload_pdf_to_storage(pdf_buffer: io.BytesIO, client_name: str) -> Optional[str]:
+    """Upload PDF to Firestore Storage and return the path."""
+    try:
+        bucket = storage.bucket(FIRESTORE_PDF_BUCKET)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        pdf_name = f"previews/{client_name.replace(' ', '_')}_PREVIA_{timestamp}.pdf"
+        blob = bucket.blob(pdf_name)
+        blob.upload_from_string(pdf_buffer.getvalue(), content_type="application/pdf")
+        return pdf_name
+    except Exception as exc:
+        st.error(f"Erro ao salvar PDF: {exc}")
+        return None
+
+
+def save_rows_to_firestore(linhas: pd.DataFrame, status: str, pdf_buffer: Optional[io.BytesIO] = None) -> None:
     db = get_firestore_client()
     if not db:
         return
+
+    # Upload PDF if provided
+    pdf_path = None
+    client_name = None
+    if pdf_buffer and st.session_state.selected_setor:
+        client_name = st.session_state.selected_setor.get("descricao", "cliente")
+        pdf_path = upload_pdf_to_storage(pdf_buffer, client_name)
 
     for _, row in linhas.iterrows():
         payload = {
@@ -192,6 +214,8 @@ def save_rows_to_firestore(linhas: pd.DataFrame, status: str) -> None:
             "Setor": row["Setor"],
             "SETOR2": row["SETOR2"],
             "status": status,
+            "client_name": client_name,
+            "pdf_path": pdf_path,
             "created_at": firestore.SERVER_TIMESTAMP,
             "updated_at": firestore.SERVER_TIMESTAMP,
         }
@@ -569,14 +593,19 @@ def persist_cart(destino: str) -> None:
     if linhas.empty:
         return
 
+    # Generate PDF for storage
+    pdf_buffer = generate_previa_pdf()
+    
     if firestore_enabled():
         status = "aguardando" if destino == "Aguardando Aprovação" else "pedido"
-        save_rows_to_firestore(linhas, status)
+        save_rows_to_firestore(linhas, status, pdf_buffer)
         sync_firestore_to_session()
     else:
         destino_df = st.session_state.excel_data.get(destino, pd.DataFrame())
         destino_df = pd.concat([destino_df, linhas], ignore_index=True)
         st.session_state.excel_data[destino] = destino_df
+    
+    st.success(f"✅ Pedido do cliente '{st.session_state.selected_setor.get('descricao', 'cliente')}' salvo com sucesso!")
     st.session_state.cart = []
     st.success(
         f"{len(linhas)} item(ns) salvo(s) em '{destino}'. Atualize a aba correspondente para visualizar."
