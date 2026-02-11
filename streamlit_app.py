@@ -694,11 +694,22 @@ def render_setor_selector(setor_df: pd.DataFrame) -> None:
         if not term:
             return setores["label"].tolist()[:50]
         term_lower = term.lower()
+        subset = setores.copy()
+        subset["desc_lower"] = subset["descricao"].astype(str).str.lower()
+        subset["code_lower"] = subset["codigo"].astype(str).str.lower()
         mask = (
-            setores["descricao"].astype(str).str.lower().str.contains(term_lower)
-            | setores["codigo"].astype(str).str.lower().str.contains(term_lower)
+            subset["desc_lower"].str.contains(term_lower)
+            | subset["code_lower"].str.contains(term_lower)
         )
-        return setores.loc[mask, "label"].tolist()[:50]
+        subset = subset.loc[mask].copy()
+        if subset.empty:
+            return []
+        subset["rank"] = (
+            subset["desc_lower"].str.startswith(term_lower).astype(int) * 2
+            + subset["code_lower"].str.startswith(term_lower).astype(int)
+        )
+        subset = subset.sort_values(["rank", "descricao"], ascending=[False, True])
+        return subset["label"].tolist()[:50]
 
     selected_label = st_searchbox(
         setor_search,
@@ -744,11 +755,22 @@ def render_product_selector(produtos_df: pd.DataFrame) -> Optional[dict]:
         if not term:
             return produtos["label"].tolist()[:50]
         term_lower = term.lower()
+        subset = produtos.copy()
+        subset["name_lower"] = subset["name"].astype(str).str.lower()
+        subset["code_lower"] = subset["productCode"].astype(str).str.lower()
         mask = (
-            produtos["name"].astype(str).str.lower().str.contains(term_lower)
-            | produtos["productCode"].astype(str).str.lower().str.contains(term_lower)
+            subset["name_lower"].str.contains(term_lower)
+            | subset["code_lower"].str.contains(term_lower)
         )
-        return produtos.loc[mask, "label"].tolist()[:50]
+        subset = subset.loc[mask].copy()
+        if subset.empty:
+            return []
+        subset["rank"] = (
+            subset["name_lower"].str.startswith(term_lower).astype(int) * 2
+            + subset["code_lower"].str.startswith(term_lower).astype(int)
+        )
+        subset = subset.sort_values(["rank", "name"], ascending=[False, True])
+        return subset["label"].tolist()[:50]
 
     selected_label = st_searchbox(
         produto_search,
