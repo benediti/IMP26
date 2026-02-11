@@ -686,20 +686,9 @@ def render_setor_selector(setor_df: pd.DataFrame) -> None:
         except ValueError:
             index = 0
 
-    busca_setor = st.text_input("Buscar setor/cliente (nome ou codigo)")
-    if busca_setor:
-        busca_lower = busca_setor.lower()
-        setores = setores[
-            setores["descricao"].astype(str).str.lower().str.contains(busca_lower)
-            | setores["codigo"].astype(str).str.lower().str.contains(busca_lower)
-        ]
-
-    if setores.empty:
-        st.info("Nenhum setor encontrado com esse filtro.")
-        return
-
+    st.caption("Dica: clique no campo e digite para filtrar.")
     selected_label = st.selectbox(
-        "2. Selecione o setor/cliente",
+        "2. Selecione o setor/cliente (digite para buscar)",
         setores["label"].tolist(),
         index=min(index, len(setores) - 1),
     )
@@ -737,8 +726,9 @@ def render_product_selector(produtos_df: pd.DataFrame) -> Optional[dict]:
         st.warning("Nenhum produto encontrado com esse filtro.")
         return None
 
+    st.caption("Dica: clique no campo e digite para filtrar.")
     selected = st.selectbox(
-        "Produto",
+        "Produto (digite para buscar)",
         registros,
         format_func=lambda item: f"{item['productCode']} - {item['name']}",
     )
