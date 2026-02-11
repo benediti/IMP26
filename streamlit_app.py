@@ -1,7 +1,7 @@
 import io
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 import pandas as pd
@@ -1048,6 +1048,95 @@ def update_excel_snapshot() -> None:
     st.session_state.excel_bytes = buffer.getvalue()
 
 
+
+
+def move_approved_to_history(order_docs: List) -> int:
+    """Move approved orders (documents with status='pedido') to history.
+    Groups by Setor and creates a history record for each group.
+    Returns the count of moved orders."""
+    try:
+        db = get_firestore_client()
+        moved_count = 0
+        
+        # Group documents by Setor
+        setor_groups = {}
+        for doc in order_docs:
+            order_data = doc.to_dict()
+            setor = order_data.get("Setor", "Unknown")
+            if setor not in setor_groups:
+                setor_groups[setor] = []
+            setor_groups[setor].append((doc.id, order_data))
+        
+        # For each setor group, create a history record
+        for setor, items_list in setor_groups.items():
+            export_date = datetime.now(timezone.utc)
+            
+            # Collect items data
+            items_data = []
+            for doc_id, order_data in items_list:
+                items_data.append({
+                    "CódProImpakto": order_data.get("CódProImpakto"),
+                    "Item": order_data.get("Item"),
+                    "Qtde": order_data.get("Qtde"),
+                    "$ Unitário": order_data.get("$ Unitário"),
+                    "$ Total": order_data.get("$ Total"),
+                    "Unidade": order_data.get("Unidade"),
+                })
+            
+            # Collect audit trail entries
+            audit_entries = []
+            for doc_id, order_data in items_list:
+                try:
+                    audit_docs = db.collection(FIRESTORE_AUDIT_COLLECTION)\
+                        .where("doc_id", "==", doc_id)\
+                        .where("action", "in", ["item_added", "item_removed", "quantity_changed"])\
+                        .stream()
+                    
+                    for audit_doc in audit_docs:
+                        audit_data = audit_doc.to_dict()
+                        audit_entries.append({
+                            "action": audit_data.get("action"),
+                            "timestamp": audit_data.get("timestamp"),
+                            "details": audit_data.get("details", {})
+                        })
+                except:
+                    pass
+            
+            # Get total value
+            total_value = sum(item.get("$ Total", 0) for item in items_data)
+            
+            # Get approval info from first item
+            first_item = items_list[0][1] if items_list else {}
+            
+            # Create history record
+            history_record = {
+                "Setor": setor,
+                "$ Total": total_value,
+                "created_at": first_item.get("created_at"),
+                "approved_at": first_item.get("approved_at"),
+                "approved_by": first_item.get("approved_by"),
+                "export_date": export_date,
+                "items": items_data,
+                "audit_trail": audit_entries,
+                "item_count": len(items_data)
+            }
+            
+            # Save to history
+            db.collection("historico_pedidos").add(history_record)
+            
+            # Delete all items for this setor from pedido_itens
+            for doc_id, _ in items_list:
+                db.collection(FIRESTORE_COLLECTION).document(doc_id).delete()
+            
+            moved_count += 1
+        
+        return moved_count
+        
+    except Exception as e:
+        st.error(f"❌ Erro ao mover pedidos para histórico: {e}")
+        return 0
+
+
 def render_download_section() -> None:
     if st.session_state.excel_data is None:
         return
@@ -1073,6 +1162,33 @@ def render_download_section() -> None:
             with open(storage_path, "wb") as handler:
                 handler.write(excel_bytes)
             st.success(f"Arquivo salvo em {storage_path}")
+    
+    # Move approved orders to history
+    st.divider()
+    st.subheader("Gerenciar Pedidos Aprovados")
+    
+    if firestore_enabled():
+        try:
+            db = get_firestore_client()
+            approved_orders = list(db.collection(FIRESTORE_COLLECTION)\
+                .where("status", "==", "pedido")\
+                .stream())
+            
+            if approved_orders:
+                st.info(f"📊 Existem {len(approved_orders)} item(ns) aprovado(s) aguardando movimentação para histórico.")
+                
+                if st.button("📚 Mover todos os pedidos aprovados para histórico", use_container_width=True):
+                    with st.spinner("Movendo pedidos para histórico..."):
+                        moved_count = move_approved_to_history(approved_orders)
+                        
+                        if moved_count > 0:
+                            st.success(f"✅ {moved_count} pedido(s) movido(s) para histórico com sucesso!")
+                            sync_firestore_to_session()
+                            st.rerun()
+            else:
+                st.info("✅ Nenhum pedido aprovado aguardando movimentação.")
+        except Exception as e:
+            st.warning(f"⚠️ Erro ao verificar pedidos aprovados: {e}")
 
 
 def render_aguardando_tab() -> None:
@@ -1518,9 +1634,141 @@ def render_approved_orders_tab() -> None:
                                     st.json(audit_row.get('details'))
                         else:
                             st.write("- Nenhum registro de auditoria disponível")
+                        
+                        # Admin delete button
+                        if st.session_state.get("current_user") == "admin":
+                            st.divider()
+                            col_delete = st.columns([1, 3])
+                            with col_delete[0]:
+                                if st.button("🗑️ Deletar", key=f"delete_approved_{order.get('__doc_id')}", help="Somente admin"):
+                                    db.collection(FIRESTORE_COLLECTION).document(order.get("__doc_id")).delete()
+                                    st.success("✅ Pedido deletado com sucesso!")
+                                    sync_firestore_to_session()
+                                    st.rerun()
     
     except Exception as e:
         st.error(f"❌ Erro ao carregar pedidos aprovados: {e}")
+
+
+def render_history_tab() -> None:
+    """Display order history with audit trail."""
+    st.subheader("📚 Histórico de Pedidos")
+    
+    try:
+        db = get_firestore_client()
+        
+        # Fetch all history records
+        try:
+            history_orders = db.collection("historico_pedidos")\
+                .order_by("export_date", direction=firestore.Query.DESCENDING)\
+                .stream()
+            
+            orders_list = []
+            for doc in history_orders:
+                order_data = doc.to_dict()
+                order_data["__doc_id"] = doc.id
+                orders_list.append(order_data)
+        except Exception as exc:
+            st.warning("⚠️ Índice não encontrado. Carregando sem ordenação.")
+            history_orders = db.collection("historico_pedidos").stream()
+            
+            orders_list = []
+            for doc in history_orders:
+                order_data = doc.to_dict()
+                order_data["__doc_id"] = doc.id
+                orders_list.append(order_data)
+            
+            def sort_key(item: Dict) -> datetime:
+                value = item.get("export_date")
+                if hasattr(value, "to_datetime"):
+                    return value.to_datetime()
+                if isinstance(value, datetime):
+                    return value
+                return datetime.min
+            
+            orders_list.sort(key=sort_key, reverse=True)
+        
+        if not orders_list:
+            st.info("ℹ️ Nenhum pedido no histórico ainda.")
+            return
+        
+        # Group by client
+        orders_df = pd.DataFrame(orders_list)
+        grouped = orders_df.groupby("Setor")
+        
+        for client, group_df in grouped:
+            with st.container(border=True):
+                col1, col2, col3 = st.columns([2, 1, 1])
+                col1.markdown(f"**👤 {client}**")
+                col2.metric("Pedidos", len(group_df))
+                col3.metric("Total", f"R$ {group_df['$ Total'].sum():.2f}")
+                
+                # Display each history order
+                for idx, order in group_df.iterrows():
+                    created_at = order.get('created_at', 'N/A')
+                    export_date = order.get('export_date', 'N/A')
+                    total = order.get('$ Total', 0)
+                    
+                    with st.expander(f"📦 Pedido - Exportado em {export_date}"):
+                        col_info, col_dates = st.columns([2, 1])
+                        
+                        with col_info:
+                            st.write("**Informações do Pedido:**")
+                            st.write(f"- Cliente/Setor: {client}")
+                            st.write(f"- Criado em: {created_at}")
+                            st.write(f"- Total: R$ {total:.2f}")
+                        
+                        with col_dates:
+                            st.write("**Datas:**")
+                            st.write(f"- Aprovado em: {order.get('approved_at', 'N/A')}")
+                            st.write(f"- Exportado em: {export_date}")
+                        
+                        st.divider()
+                        
+                        # Display items
+                        st.write("**Itens do Pedido:**")
+                        items = order.get('items', [])
+                        if items:
+                            items_df = pd.DataFrame(items)
+                            items_df.columns = ["📦 Código", "📝 Produto", "🔢 Qtde", "💵 Unit.", "💰 Total", "📐 Un."]
+                            st.dataframe(items_df, use_container_width=True, hide_index=True)
+                        else:
+                            st.write("- Nenhum item registrado")
+                        
+                        st.divider()
+                        
+                        # Display audit trail with double-click functionality
+                        st.write("**Histórico de Alterações (durante Aguardando Aprovação):**")
+                        
+                        audit_entries = order.get('audit_trail', [])
+                        if audit_entries:
+                            for i, entry in enumerate(audit_entries):
+                                action = entry.get('action', 'N/A')
+                                timestamp = entry.get('timestamp', 'N/A')
+                                details = entry.get('details', {})
+                                
+                                # Display audit entry
+                                col1, col2 = st.columns([3, 1])
+                                with col1:
+                                    st.write(f"- **{action}** em {timestamp}")
+                                    if action == "item_added":
+                                        product_name = details.get('product_name', 'Produto desconhecido')
+                                        qtde = details.get('quantity', 0)
+                                        st.caption(f"  ➕ Adicionado: {product_name} (Qtde: {qtde})")
+                                    elif action == "item_removed":
+                                        product_name = details.get('product_name', 'Produto desconhecido')
+                                        qtde = details.get('quantity', 0)
+                                        st.caption(f"  ➖ Removido: {product_name} (Qtde: {qtde})")
+                                    elif action == "quantity_changed":
+                                        product_name = details.get('product_name', 'Produto desconhecido')
+                                        old_qty = details.get('old_quantity', 0)
+                                        new_qty = details.get('new_quantity', 0)
+                                        st.caption(f"  🔄 {product_name}: {old_qty} → {new_qty}")
+                        else:
+                            st.write("- Nenhuma alteração registrada")
+    
+    except Exception as e:
+        st.error(f"❌ Erro ao carregar histórico: {e}")
 
 
 def render_user_management_tab() -> None:
@@ -1630,17 +1878,19 @@ def main() -> None:
 
     # Create tabs based on user role
     if st.session_state.get("current_user") == "admin":
-        tab_novo, tab_aguardando, tab_aprovados, tab_usuarios = st.tabs([
+        tab_novo, tab_aguardando, tab_aprovados, tab_historico, tab_usuarios = st.tabs([
             "Novo Pedido", 
             "Aguardando Aprovação", 
             "📋 Pedidos Aprovados",
+            "📚 Histórico de Pedidos",
             "👥 Gerenciar Usuários"
         ])
     else:
-        tab_novo, tab_aguardando, tab_aprovados = st.tabs([
+        tab_novo, tab_aguardando, tab_aprovados, tab_historico = st.tabs([
             "Novo Pedido", 
             "Aguardando Aprovação", 
-            "📋 Pedidos Aprovados"
+            "📋 Pedidos Aprovados",
+            "📚 Histórico de Pedidos"
         ])
     
     with tab_novo:
@@ -1649,6 +1899,8 @@ def main() -> None:
         render_aguardando_tab()
     with tab_aprovados:
         render_approved_orders_tab()
+    with tab_historico:
+        render_history_tab()
     
     if st.session_state.get("current_user") == "admin":
         with tab_usuarios:
