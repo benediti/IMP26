@@ -3,10 +3,11 @@
 """
 Sistema de Gestão de Pedidos
 Gerencia pedidos de produtos por setor/cliente
+(Arquivo legado - compatível com Streamlit)
 """
 
-import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+# import tkinter as tk
+# from tkinter import ttk, messagebox, filedialog
 import pandas as pd
 from datetime import datetime
 import uuid
