@@ -1184,7 +1184,7 @@ def render_aguardando_tab() -> None:
             is_expanded = st.session_state.get("edit_client") == client
             with st.expander("✏️ Editar pedido", expanded=is_expanded):
                 st.markdown("**Itens atuais (editar):**")
-                st.caption("Edite o produto e a quantidade e clique em salvar.")
+                st.caption("Edite o produto e a quantidade. Marque 'Remover' para deletar linhas.")
 
                 editor_source = group_df[["CódProImpakto", "Item", "Qtde", "__doc_id"]].copy()
                 
@@ -1222,7 +1222,8 @@ def render_aguardando_tab() -> None:
                     return f"{codigo} - {nome}"
                 
                 editor_source["Produto"] = editor_source.apply(get_product_label, axis=1)
-                editor_display = editor_source[["Produto", "Qtde"]].reset_index(drop=True)
+                editor_source["Remover"] = False
+                editor_display = editor_source[["Produto", "Qtde", "Remover"]].reset_index(drop=True)
                 doc_ids = editor_source["__doc_id"].tolist()
 
                 if produto_options:
@@ -1243,6 +1244,10 @@ def render_aguardando_tab() -> None:
                             min_value=1,
                             step=1,
                         ),
+                        "Remover": st.column_config.CheckboxColumn(
+                            "Remover",
+                            help="Marque para remover esta linha"
+                        ),
                     },
                     hide_index=True,
                     use_container_width=True,
@@ -1250,7 +1255,10 @@ def render_aguardando_tab() -> None:
                 )
 
                 edited_total = 0.0
-                for _, row in edited_df.iterrows():
+                for row_idx, row in edited_df.iterrows():
+                    # Skip removed items in total calculation
+                    if row.get("Remover", False):
+                        continue
                     label = row.get("Produto")
                     qtde = parse_int(row.get("Qtde"))
                     produto = produtos_map.get(label)
@@ -1263,6 +1271,12 @@ def render_aguardando_tab() -> None:
                         db = get_firestore_client()
                         for row_idx, row in edited_df.iterrows():
                             doc_id = doc_ids[row_idx]
+                            
+                            # Delete if marked for removal
+                            if row.get("Remover", False):
+                                db.collection(FIRESTORE_COLLECTION).document(doc_id).delete()
+                                continue
+                            
                             label = row.get("Produto")
                             qtde = parse_int(row.get("Qtde"))
                             produto = produtos_map.get(label)
@@ -1284,71 +1298,42 @@ def render_aguardando_tab() -> None:
                     st.rerun()
 
                 st.divider()
-
-                col_remove, col_add = st.columns([1, 1])
-                with col_remove:
-                    with st.container(border=True):
-                        st.markdown("**Remover itens:**")
-                        items_to_remove = st.multiselect(
-                            "Selecione itens para remover",
-                            group_df.index,
-                            format_func=lambda idx: f"🗑️ {df.loc[idx, 'Item']} (Qtde: {df.loc[idx, 'Qtde']})",
-                            key=f"remove_{client}",
+                st.markdown("**Adicionar mais itens ao pedido:**")
+                col_add = st.container()
+                with col_add:
+                    produtos_list = st.session_state.excel_data.get("Produtos", pd.DataFrame()).copy()
+                    new_produto_label = None
+                    produtos_map = {}
+                    if not produtos_list.empty:
+                        produtos_list["price"] = pd.to_numeric(
+                            produtos_list.get("price"), errors="coerce"
+                        ).fillna(0.0)
+                        produtos_list["label"] = produtos_list.apply(
+                            lambda row: f"{row['productCode']} - {row['name']}", axis=1
+                        )
+                        produtos_map = {
+                            row["label"]: row for _, row in produtos_list.iterrows()
+                        }
+                        busca = st.text_input(
+                            "Buscar produto (codigo ou nome)",
+                            key=f"search_add_{client}",
                             label_visibility="collapsed",
                         )
-
-                        if items_to_remove and st.button(
-                            "🗑️ Remover selecionados",
-                            key=f"confirm_remove_{client}",
-                            use_container_width=True,
-                        ):
-                            if firestore_enabled():
-                                db = get_firestore_client()
-                                for idx in items_to_remove:
-                                    doc_id = df.loc[idx, "__doc_id"]
-                                    db.collection(FIRESTORE_COLLECTION).document(doc_id).delete()
-                                sync_firestore_to_session()
-                            st.success("✅ Itens removidos!")
-                            st.rerun()
-
-                with col_add:
-                    with st.container(border=True):
-                        st.markdown("**Adicionar itens:**")
-                        produtos_list = st.session_state.excel_data.get("Produtos", pd.DataFrame()).copy()
-                        new_produto_label = None
-                        produtos_map = {}
+                        if busca:
+                            busca_lower = busca.lower()
+                            produtos_list = produtos_list[
+                                produtos_list["name"].astype(str).str.lower().str.contains(busca_lower)
+                                | produtos_list["productCode"].astype(str).str.lower().str.contains(busca_lower)
+                            ]
                         if not produtos_list.empty:
-                            produtos_list["price"] = pd.to_numeric(
-                                produtos_list.get("price"), errors="coerce"
-                            ).fillna(0.0)
-                            produtos_list["label"] = produtos_list.apply(
-                                lambda row: f"{row['productCode']} - {row['name']}", axis=1
-                            )
-                            produtos_map = {
-                                row["label"]: row for _, row in produtos_list.iterrows()
-                            }
-                            busca = st.text_input(
-                                "Buscar produto (codigo ou nome)",
-                                key=f"search_add_{client}",
+                            new_produto_label = st.selectbox(
+                                "Produto",
+                                produtos_list["label"].tolist(),
+                                key=f"new_produto_{client}",
                                 label_visibility="collapsed",
                             )
-                            if busca:
-                                busca_lower = busca.lower()
-                                produtos_list = produtos_list[
-                                    produtos_list["name"].astype(str).str.lower().str.contains(busca_lower)
-                                    | produtos_list["productCode"].astype(str).str.lower().str.contains(busca_lower)
-                                ]
-                            if not produtos_list.empty:
-                                new_produto_label = st.selectbox(
-                                    "Produto",
-                                    produtos_list["label"].tolist(),
-                                    key=f"new_produto_{client}",
-                                    label_visibility="collapsed",
-                                )
-                            else:
-                                st.info("Nenhum produto encontrado com esse filtro.")
                         else:
-                            st.warning("Lista de produtos vazia.")
+                            st.info("Nenhum produto encontrado com esse filtro.")
 
                         new_qtde = st.number_input(
                             "Quantidade",
