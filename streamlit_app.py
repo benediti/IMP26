@@ -928,7 +928,7 @@ def generate_previa_pdf() -> Optional[io.BytesIO]:
         [
             ["Data:", datetime.now().strftime("%d/%m/%Y %H:%M")],
             ["Cliente:", str(COD_CLIENTE_IMPAKTO)],
-            ["Setor:", setor["label"]],
+            ["Setor:", f"{setor['codigo']} - {setor['descricao']}"],
             ["Itens:", str(len(cart))],
         ],
         colWidths=[3.5 * 28.35, 10 * 28.35],
