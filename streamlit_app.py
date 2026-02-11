@@ -250,13 +250,17 @@ def delete_user(username: str) -> bool:
         doc_ref = db.collection(FIRESTORE_USERS_COLLECTION).document(username)
         doc = doc_ref.get()
         if not doc.exists:
-            st.error(f"❌ Usuário '{username}' não encontrado.")
+            message = f"❌ Usuário '{username}' não encontrado."
+            st.session_state["user_action_error"] = message
+            st.error(message)
             return False
         doc_ref.delete()
         log_audit("delete_user", {"username": username})
         return True
     except Exception as e:
-        st.error(f"❌ Erro ao deletar usuário: {e}")
+        message = f"❌ Erro ao deletar usuário: {e}"
+        st.session_state["user_action_error"] = message
+        st.error(message)
         return False
 
 
@@ -267,7 +271,9 @@ def update_user_password(username: str, new_password: str) -> bool:
         return False
     
     if not new_password:
-        st.error("❌ Nova senha é obrigatória.")
+        message = "❌ Nova senha é obrigatória."
+        st.session_state["user_action_error"] = message
+        st.error(message)
         return False
     
     try:
@@ -280,7 +286,9 @@ def update_user_password(username: str, new_password: str) -> bool:
         log_audit("update_user_password", {"username": username})
         return True
     except Exception as e:
-        st.error(f"❌ Erro ao atualizar senha: {e}")
+        message = f"❌ Erro ao atualizar senha: {e}"
+        st.session_state["user_action_error"] = message
+        st.error(message)
         return False
 
 
@@ -1861,6 +1869,8 @@ def render_user_management_tab() -> None:
 
             if st.session_state.get("user_action_message"):
                 st.success(st.session_state.pop("user_action_message"))
+            if st.session_state.get("user_action_error"):
+                st.error(st.session_state.pop("user_action_error"))
             
             col1, col2, col3 = st.columns([1, 1, 1])
 
