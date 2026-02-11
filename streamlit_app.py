@@ -1184,7 +1184,7 @@ def render_aguardando_tab() -> None:
             is_expanded = st.session_state.get("edit_client") == client
             with st.expander("✏️ Editar pedido", expanded=is_expanded):
                 st.markdown("**Editar itens do pedido:**")
-                st.caption("Edite cada linha e clique em 'Remover' para deletar ou salve para aplicar as mudanças.")
+                st.caption("Altere as quantidades e remova itens conforme necessário.")
 
                 # Load product data
                 produtos_df = st.session_state.excel_data.get("Produtos", pd.DataFrame()).copy()
@@ -1192,218 +1192,93 @@ def render_aguardando_tab() -> None:
                     produtos_df["price"] = pd.to_numeric(
                         produtos_df.get("price"), errors="coerce"
                     ).fillna(0.0)
-                    produtos_df["label"] = produtos_df.apply(
-                        lambda row: f"{row['productCode']} - {row['name']}", axis=1
-                    )
-                    produto_options = produtos_df["label"].tolist()
-                    produtos_map = {
-                        row["label"]: row for _, row in produtos_df.iterrows()
-                    }
-                    code_to_name = {
-                        str(row['productCode']): str(row['name']) for _, row in produtos_df.iterrows()
-                    }
                 else:
-                    produto_options = []
-                    produtos_map = {}
-                    code_to_name = {}
+                    produtos_df = pd.DataFrame()
 
-                # Display header
-                col_header1, col_header2, col_header3, col_header4 = st.columns([3, 1.5, 1.5, 1])
-                with col_header1:
-                    st.write("**Produto**")
-                with col_header2:
-                    st.write("**Qtde**")
-                with col_header3:
-                    st.write("**Preço Unit.**")
-                with col_header4:
-                    st.write("**Ação**")
-
-                # Store edited items
-                items_to_save = []
-                doc_ids_to_save = []
-                doc_ids_to_remove = []
-                
-                edited_total = 0.0
-
-                for idx, (_, row) in enumerate(group_df.iterrows()):
+                # Prepare data for editing
+                edit_data = []
+                for _, row in group_df.iterrows():
                     codigo = str(row["CódProImpakto"])
                     nome = row["Item"]
-                    if pd.isna(nome) or str(nome).strip() == "":
-                        nome = code_to_name.get(codigo, "Produto desconhecido")
-                    
-                    qtde_atual = int(row["Qtde"])
-                    preco_atual = float(row["$ Unitário"])
+                    qtde = int(row["Qtde"])
+                    preco = float(row["$ Unitário"])
                     doc_id = row["__doc_id"]
-
-                    col1, col2, col3, col4 = st.columns([3, 1.5, 1.5, 1])
+                    
+                    edit_data.append({
+                        "codigo": codigo,
+                        "nome": nome,
+                        "qtde": qtde,
+                        "preco": preco,
+                        "total": preco * qtde,
+                        "doc_id": doc_id,
+                    })
+                
+                # Display each item
+                edited_total = 0.0
+                remove_list = []
+                qtde_dict = {}
+                
+                for i, item in enumerate(edit_data):
+                    col1, col2, col3, col4, col5 = st.columns([2, 1, 1.2, 1, 1])
                     
                     with col1:
-                        if produto_options:
-                            selected_label = st.selectbox(
-                                "Produto",
-                                produto_options,
-                                index=0 if codigo not in [c.split(" - ")[0] for c in produto_options] else 
-                                    [c.split(" - ")[0] for c in produto_options].index(codigo),
-                                key=f"prod_{client}_{idx}",
-                                label_visibility="collapsed",
-                            )
-                        else:
-                            selected_label = st.text_input(
-                                "Produto",
-                                value=f"{codigo} - {nome}",
-                                key=f"prod_{client}_{idx}",
-                                label_visibility="collapsed",
-                            )
+                        st.markdown(f"**{item['codigo']}** - {item['nome']}")
                     
                     with col2:
                         new_qtde = st.number_input(
                             "Qtde",
                             min_value=1,
-                            value=qtde_atual,
-                            key=f"qtde_{client}_{idx}",
+                            value=item["qtde"],
+                            key=f"qtde_{client}_{i}",
                             label_visibility="collapsed",
                         )
+                        qtde_dict[item["doc_id"]] = new_qtde
                     
                     with col3:
-                        produto = produtos_map.get(selected_label) if produto_options else None
-                        if produto:
-                            new_preco = float(produto.get("price", preco_atual))
-                        else:
-                            new_preco = preco_atual
-                        st.write(format_currency(new_preco))
+                        new_total = item["preco"] * new_qtde
+                        st.write(f"**R$ {new_total:.2f}**")
+                        edited_total += new_total
                     
                     with col4:
-                        if st.button("🗑️", key=f"remove_{client}_{idx}", help="Remover"):
-                            doc_ids_to_remove.append(doc_id)
+                        st.write(f"Unit: R$ {item['preco']:.2f}")
                     
-                    # Accumulate total and save info if not being removed
-                    if doc_id not in doc_ids_to_remove:
-                        edited_total += new_preco * new_qtde
-                        items_to_save.append({
-                            "doc_id": doc_id,
-                            "selected_label": selected_label,
-                            "qtde": int(new_qtde),
-                        })
+                    with col5:
+                        if st.button("🗑️ Remover", key=f"remove_{client}_{i}"):
+                            remove_list.append(item["doc_id"])
                 
                 st.divider()
-                st.metric("Total (previa)", format_currency(edited_total))
-
+                st.metric("Total (previa)", f"R$ {edited_total:.2f}")
+                
                 col_save, col_cancel = st.columns(2)
                 with col_save:
                     if st.button("💾 Salvar alteracoes", key=f"save_edit_{client}", use_container_width=True):
                         if firestore_enabled():
                             db = get_firestore_client()
                             
-                            # Remove marked items
-                            for doc_id in doc_ids_to_remove:
+                            # Remove items
+                            for doc_id in remove_list:
                                 db.collection(FIRESTORE_COLLECTION).document(doc_id).delete()
                             
-                            # Update edited items
-                            for item in items_to_save:
-                                doc_id = item["doc_id"]
-                                selected_label = item["selected_label"]
-                                qtde = item["qtde"]
-                                
-                                produto = produtos_map.get(selected_label)
-                                if not produto:
-                                    continue
-                                
-                                preco = parse_float(produto.get("price"))
-                                codigo = str(produto.get("productCode"))
-                                nome = str(produto.get("name"))
-                                
-                                db.collection(FIRESTORE_COLLECTION).document(doc_id).update({
-                                    "CódProImpakto": codigo,
-                                    "Item": nome,
-                                    "Qtde": qtde,
-                                    "$ Unitário": preco,
-                                    "$ Total": preco * qtde,
-                                    "updated_at": firestore.SERVER_TIMESTAMP,
-                                })
+                            # Update quantities for remaining items
+                            for item in edit_data:
+                                if item["doc_id"] not in remove_list:
+                                    new_qtde = qtde_dict.get(item["doc_id"], item["qtde"])
+                                    new_total = item["preco"] * new_qtde
+                                    
+                                    db.collection(FIRESTORE_COLLECTION).document(item["doc_id"]).update({
+                                        "Qtde": int(new_qtde),
+                                        "$ Total": float(new_total),
+                                        "updated_at": firestore.SERVER_TIMESTAMP,
+                                    })
                             
                             sync_firestore_to_session()
-                        st.success("✅ Alteracoes salvas!")
-                        st.rerun()
+                            st.success("✅ Alteracoes salvas!")
+                            st.rerun()
                 
                 with col_cancel:
                     if st.button("❌ Cancelar", key=f"cancel_edit_{client}", use_container_width=True):
                         st.session_state.edit_client = None
                         st.rerun()
-
-                st.divider()
-                st.markdown("**Adicionar mais itens ao pedido:**")
-                col_add = st.container()
-                with col_add:
-                    produtos_list = st.session_state.excel_data.get("Produtos", pd.DataFrame()).copy()
-                    new_produto_label = None
-                    produtos_map = {}
-                    if not produtos_list.empty:
-                        produtos_list["price"] = pd.to_numeric(
-                            produtos_list.get("price"), errors="coerce"
-                        ).fillna(0.0)
-                        produtos_list["label"] = produtos_list.apply(
-                            lambda row: f"{row['productCode']} - {row['name']}", axis=1
-                        )
-                        produtos_map = {
-                            row["label"]: row for _, row in produtos_list.iterrows()
-                        }
-                        busca = st.text_input(
-                            "Buscar produto (codigo ou nome)",
-                            key=f"search_add_{client}",
-                            label_visibility="collapsed",
-                        )
-                        if busca:
-                            busca_lower = busca.lower()
-                            produtos_list = produtos_list[
-                                produtos_list["name"].astype(str).str.lower().str.contains(busca_lower)
-                                | produtos_list["productCode"].astype(str).str.lower().str.contains(busca_lower)
-                            ]
-                        if not produtos_list.empty:
-                            new_produto_label = st.selectbox(
-                                "Produto",
-                                produtos_list["label"].tolist(),
-                                key=f"new_produto_{client}",
-                                label_visibility="collapsed",
-                            )
-                        else:
-                            st.info("Nenhum produto encontrado com esse filtro.")
-
-                        new_qtde = st.number_input(
-                            "Quantidade",
-                            min_value=1,
-                            value=1,
-                            key=f"new_qtde_{client}",
-                            label_visibility="collapsed",
-                        )
-
-                        if new_produto_label and st.button(
-                            "➕ Adicionar",
-                            key=f"add_item_{client}",
-                            use_container_width=True,
-                        ):
-                            produto = produtos_map.get(new_produto_label)
-                            if produto is None:
-                                st.error("❌ Produto invalido.")
-                            else:
-                                template = group_df.iloc[0].to_dict()
-                                novo_item = template.copy()
-                                novo_item["CódProImpakto"] = str(produto.get("productCode"))
-                                novo_item["Item"] = str(produto.get("name"))
-                                novo_item["Qtde"] = new_qtde
-                                novo_item["$ Unitário"] = parse_float(produto.get("price"))
-                                novo_item["$ Total"] = parse_float(produto.get("price")) * new_qtde
-                                novo_item["status"] = "aguardando"
-
-                                if "__doc_id" in novo_item:
-                                    del novo_item["__doc_id"]
-
-                                if firestore_enabled():
-                                    db = get_firestore_client()
-                                    db.collection(FIRESTORE_COLLECTION).add(novo_item)
-                                    sync_firestore_to_session()
-
-                                st.success("✅ Item adicionado!")
-                                st.rerun()
             
             st.write("")  # Spacing
 
