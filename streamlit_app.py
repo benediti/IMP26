@@ -1856,25 +1856,35 @@ def render_user_management_tab() -> None:
             selected_user = st.selectbox("👤 Selecione usuário", usernames)
             
             col1, col2, col3 = st.columns([1, 1, 1])
-            
+
             with col1:
-                if st.button("🔑 Redefinir Senha", use_container_width=True):
-                    new_pwd = st.text_input("Nova Senha", type="password", key="reset_pwd")
-                    confirm_pwd = st.text_input("Confirmar Senha", type="password", key="confirm_pwd")
-                    
-                    if st.button("✅ Atualizar Senha"):
-                        if new_pwd != confirm_pwd:
-                            st.error("❌ Senhas não correspondem.")
-                        else:
-                            update_user_password(selected_user, new_pwd)
-            
+                st.markdown("**Redefinir Senha**")
+                new_pwd = st.text_input("Nova Senha", type="password", key="reset_pwd")
+                confirm_pwd = st.text_input("Confirmar Senha", type="password", key="confirm_pwd")
+                if st.button("✅ Atualizar Senha", use_container_width=True):
+                    if not new_pwd:
+                        st.error("❌ Informe a nova senha.")
+                    elif new_pwd != confirm_pwd:
+                        st.error("❌ Senhas não correspondem.")
+                    else:
+                        update_user_password(selected_user, new_pwd)
+                        st.success("✅ Senha atualizada!")
+
             with col2:
-                if st.button("🗑️ Deletar Usuário", use_container_width=True):
-                    if st.warning(f"⚠️ Tem certeza que quer deletar '{selected_user}'?"):
-                        if st.button("✅ Confirmar Deleção"):
-                            delete_user(selected_user)
-                            st.rerun()
-            
+                st.markdown("**Deletar Usuário**")
+                confirm_delete = st.checkbox(
+                    f"Confirmo excluir '{selected_user}'",
+                    key=f"confirm_delete_user_{selected_user}",
+                )
+                if st.button(
+                    "🗑️ Deletar Usuário",
+                    use_container_width=True,
+                    disabled=not confirm_delete,
+                ):
+                    delete_user(selected_user)
+                    st.success("✅ Usuário deletado!")
+                    st.rerun()
+
             with col3:
                 st.write("")  # Placeholder for alignment
 
