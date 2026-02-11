@@ -1174,7 +1174,7 @@ def render_aguardando_tab() -> None:
                     label = row.get("Produto")
                     qtde = parse_int(row.get("Qtde"))
                     produto = produtos_map.get(label)
-                    if produto:
+                    if produto is not None:
                         edited_total += parse_float(produto.get("price")) * qtde
                 st.metric("Total (previa)", format_currency(edited_total))
 
