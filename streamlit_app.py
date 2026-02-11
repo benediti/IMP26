@@ -1192,8 +1192,21 @@ def render_aguardando_tab() -> None:
                     produtos_df["price"] = pd.to_numeric(
                         produtos_df.get("price"), errors="coerce"
                     ).fillna(0.0)
+                    produtos_df["label"] = produtos_df.apply(
+                        lambda row: f"{row['productCode']} - {row['name']}", axis=1
+                    )
+                    produto_options = produtos_df["label"].tolist()
+                    produtos_map = {
+                        row["label"]: row for _, row in produtos_df.iterrows()
+                    }
                 else:
                     produtos_df = pd.DataFrame()
+                    produto_options = []
+                    produtos_map = {}
+
+                # Initialize session state for new items
+                if f"new_items_{client}" not in st.session_state:
+                    st.session_state[f"new_items_{client}"] = []
 
                 # Prepare data for editing
                 edit_data = []
@@ -1211,6 +1224,19 @@ def render_aguardando_tab() -> None:
                         "preco": preco,
                         "total": preco * qtde,
                         "doc_id": doc_id,
+                        "is_new": False,
+                    })
+                
+                # Add new items from session state
+                for new_item in st.session_state[f"new_items_{client}"]:
+                    edit_data.append({
+                        "codigo": new_item["codigo"],
+                        "nome": new_item["nome"],
+                        "qtde": new_item["qtde"],
+                        "preco": new_item["preco"],
+                        "total": new_item["preco"] * new_item["qtde"],
+                        "doc_id": None,
+                        "is_new": True,
                     })
                 
                 # Display each item
@@ -1232,7 +1258,8 @@ def render_aguardando_tab() -> None:
                             key=f"qtde_{client}_{i}",
                             label_visibility="collapsed",
                         )
-                        qtde_dict[item["doc_id"]] = new_qtde
+                        if item["doc_id"]:
+                            qtde_dict[item["doc_id"]] = new_qtde
                     
                     with col3:
                         new_total = item["preco"] * new_qtde
@@ -1244,7 +1271,61 @@ def render_aguardando_tab() -> None:
                     
                     with col5:
                         if st.button("🗑️ Remover", key=f"remove_{client}_{i}"):
-                            remove_list.append(item["doc_id"])
+                            if item["doc_id"]:
+                                remove_list.append(item["doc_id"])
+                            else:
+                                # Remove from new items
+                                idx_to_remove = None
+                                for idx, new_item in enumerate(st.session_state[f"new_items_{client}"]):
+                                    if (new_item["codigo"] == item["codigo"] and 
+                                        new_item["nome"] == item["nome"] and
+                                        new_item["preco"] == item["preco"]):
+                                        idx_to_remove = idx
+                                        break
+                                if idx_to_remove is not None:
+                                    st.session_state[f"new_items_{client}"].pop(idx_to_remove)
+                                st.rerun()
+                
+                # Add new product button
+                st.divider()
+                st.markdown("**Adicionar novo item:**")
+                
+                col_add1, col_add2, col_add3 = st.columns([2, 1, 1])
+                
+                with col_add1:
+                    if produto_options:
+                        new_prod_label = st.selectbox(
+                            "Produto",
+                            produto_options,
+                            key=f"new_prod_{client}",
+                            label_visibility="collapsed",
+                        )
+                    else:
+                        new_prod_label = None
+                        st.warning("Nenhum produto disponível")
+                
+                with col_add2:
+                    new_qtde_add = st.number_input(
+                        "Qtde",
+                        min_value=1,
+                        value=1,
+                        key=f"new_qtde_add_{client}",
+                        label_visibility="collapsed",
+                    )
+                
+                with col_add3:
+                    if st.button("➕ Adicionar", key=f"add_item_{client}", use_container_width=True):
+                        if new_prod_label and new_prod_label in produtos_map:
+                            produto = produtos_map[new_prod_label]
+                            new_item = {
+                                "codigo": str(produto.get("productCode")),
+                                "nome": str(produto.get("name")),
+                                "qtde": int(new_qtde_add),
+                                "preco": float(produto.get("price", 0.0)),
+                            }
+                            st.session_state[f"new_items_{client}"].append(new_item)
+                            st.success(f"✅ {new_item['nome']} adicionado!")
+                            st.rerun()
                 
                 st.divider()
                 st.metric("Total (previa)", f"R$ {edited_total:.2f}")
@@ -1259,9 +1340,9 @@ def render_aguardando_tab() -> None:
                             for doc_id in remove_list:
                                 db.collection(FIRESTORE_COLLECTION).document(doc_id).delete()
                             
-                            # Update quantities for remaining items
+                            # Update quantities for existing items
                             for item in edit_data:
-                                if item["doc_id"] not in remove_list:
+                                if not item["is_new"] and item["doc_id"] not in remove_list:
                                     new_qtde = qtde_dict.get(item["doc_id"], item["qtde"])
                                     new_total = item["preco"] * new_qtde
                                     
@@ -1271,6 +1352,30 @@ def render_aguardando_tab() -> None:
                                         "updated_at": firestore.SERVER_TIMESTAMP,
                                     })
                             
+                            # Add new items to Firestore
+                            setor = st.session_state.selected_setor
+                            if setor:
+                                for new_item in st.session_state[f"new_items_{client}"]:
+                                    payload = {
+                                        "CòdClienteImpakto": COD_CLIENTE_IMPAKTO,
+                                        "CódProImpakto": new_item["codigo"],
+                                        "Item": new_item["nome"],
+                                        "Qtde": int(new_item["qtde"]),
+                                        "$ Unitário": float(new_item["preco"]),
+                                        "$ Total": float(new_item["preco"] * new_item["qtde"]),
+                                        "Unidade": setor["codigo"],
+                                        "Setor": setor["codigo"],
+                                        "SETOR2": setor["descricao"],
+                                        "status": "aguardando",
+                                        "client_name": setor.get("descricao", "cliente"),
+                                        "pdf_path": None,
+                                        "created_at": firestore.SERVER_TIMESTAMP,
+                                        "updated_at": firestore.SERVER_TIMESTAMP,
+                                    }
+                                    db.collection(FIRESTORE_COLLECTION).add(payload)
+                            
+                            # Clear new items
+                            st.session_state[f"new_items_{client}"] = []
                             sync_firestore_to_session()
                             st.success("✅ Alteracoes salvas!")
                             st.rerun()
@@ -1278,6 +1383,7 @@ def render_aguardando_tab() -> None:
                 with col_cancel:
                     if st.button("❌ Cancelar", key=f"cancel_edit_{client}", use_container_width=True):
                         st.session_state.edit_client = None
+                        st.session_state[f"new_items_{client}"] = []
                         st.rerun()
             
             st.write("")  # Spacing
