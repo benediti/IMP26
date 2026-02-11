@@ -23,6 +23,7 @@ FIRESTORE_SETORES_COLLECTION = "setores"
 FIRESTORE_PDF_BUCKET = "material-basico"
 FIRESTORE_AUDIT_COLLECTION = "audit_trail"
 FIRESTORE_USERS_COLLECTION = "users"
+ENABLE_PDF_STORAGE = os.getenv("ENABLE_PDF_STORAGE", "false").lower() == "true"  # Disabled by default
 APP_PASSWORD = os.getenv("APP_PASSWORD", "admin123")  # Default for testing
 SESSION_DEFAULTS = {
     "excel_data": None,
@@ -416,6 +417,9 @@ def sync_firestore_to_session() -> None:
 
 def upload_pdf_to_storage(pdf_buffer: io.BytesIO, client_name: str) -> Optional[str]:
     """Upload PDF to Firestore Storage and return the path."""
+    if not ENABLE_PDF_STORAGE:
+        return None
+    
     try:
         # Get Firebase Admin SDK instance
         if not firebase_admin._apps:
@@ -434,7 +438,9 @@ def upload_pdf_to_storage(pdf_buffer: io.BytesIO, client_name: str) -> Optional[
         st.success(f"✅ PDF salvo em Storage: {pdf_name}")
         return pdf_name
     except Exception as exc:
-        st.error(f"Erro ao salvar PDF no Storage: {exc}")
+        # If bucket doesn't exist or upload fails, just log it and continue
+        # The order is still saved in Firestore which is the important part
+        st.warning(f"⚠️ Não foi possível salvar PDF em Storage (storage não configurado), mas o pedido foi salvo normalmente.")
         return None
 
 
