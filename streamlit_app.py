@@ -686,10 +686,22 @@ def render_setor_selector(setor_df: pd.DataFrame) -> None:
         except ValueError:
             index = 0
 
+    busca_setor = st.text_input("Buscar setor/cliente (nome ou codigo)")
+    if busca_setor:
+        busca_lower = busca_setor.lower()
+        setores = setores[
+            setores["descricao"].astype(str).str.lower().str.contains(busca_lower)
+            | setores["codigo"].astype(str).str.lower().str.contains(busca_lower)
+        ]
+
+    if setores.empty:
+        st.info("Nenhum setor encontrado com esse filtro.")
+        return
+
     selected_label = st.selectbox(
         "2. Selecione o setor/cliente",
         setores["label"].tolist(),
-        index=index,
+        index=min(index, len(setores) - 1),
     )
 
     selected_row = setores[setores["label"] == selected_label].iloc[0]
