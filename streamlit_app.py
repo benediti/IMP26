@@ -730,14 +730,6 @@ def render_product_selector(produtos_df: pd.DataFrame) -> Optional[dict]:
     produtos = produtos_df.copy()
     produtos["price"] = pd.to_numeric(produtos.get("price"), errors="coerce").fillna(0.0)
 
-    busca = st.text_input("3. Buscar produto (nome ou código)")
-    if busca:
-        busca_lower = busca.lower()
-        produtos = produtos[
-            produtos["name"].astype(str).str.lower().str.contains(busca_lower)
-            | produtos["productCode"].astype(str).str.lower().str.contains(busca_lower)
-        ]
-
     produtos = produtos.sort_values("name")
     registros = produtos.to_dict("records")
 
