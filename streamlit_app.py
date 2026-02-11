@@ -161,6 +161,37 @@ def verify_password(password: str, hashed: str) -> bool:
         return False
 
 
+def get_user_info(username: str) -> Dict:
+    """Get user information from Firestore."""
+    if not firestore_enabled() or not username:
+        return {"role": "user", "assigned_setores": []}
+    
+    try:
+        db = get_firestore_client()
+        doc = db.collection(FIRESTORE_USERS_COLLECTION).document(username).get()
+        if doc.exists:
+            user_data = doc.to_dict()
+            return {
+                "role": user_data.get("role", "user"),
+                "assigned_setores": user_data.get("assigned_setores", [])
+            }
+    except:
+        pass
+    
+    return {"role": "user", "assigned_setores": []}
+
+
+def filter_setores_for_user(setores_df: pd.DataFrame, user_info: Dict) -> pd.DataFrame:
+    """Filter setores based on user role and assignments."""
+    if user_info["role"] == "supervisora" and user_info["assigned_setores"]:
+        # Filter only assigned setores
+        filtered = setores_df[setores_df["label"].isin(user_info["assigned_setores"])]
+        return filtered
+    
+    # Admin and user see all setores
+    return setores_df
+
+
 def get_users_list() -> List[Dict]:
     """Fetch all users from Firestore."""
     if not firestore_enabled():
@@ -204,7 +235,7 @@ def validate_user_credentials(username: str, password: str) -> bool:
         return False
 
 
-def create_user(username: str, password: str, role: str = "user") -> bool:
+def create_user(username: str, password: str, role: str = "user", assigned_setores: List[str] = None) -> bool:
     """Create a new user in Firestore."""
     if not firestore_enabled():
         st.error("❌ Firestore não disponível para criar usuários.")
@@ -230,9 +261,14 @@ def create_user(username: str, password: str, role: str = "user") -> bool:
             "created_at": firestore.SERVER_TIMESTAMP,
             "updated_at": firestore.SERVER_TIMESTAMP,
         }
+        
+        # Add assigned setores for supervisora role
+        if role == "supervisora" and assigned_setores:
+            user_data["assigned_setores"] = assigned_setores
+        
         db.collection(FIRESTORE_USERS_COLLECTION).document(username).set(user_data)
         st.success(f"✅ Usuário '{username}' criado com sucesso!")
-        log_audit("create_user", {"username": username, "role": role})
+        log_audit("create_user", {"username": username, "role": role, "assigned_setores": assigned_setores})
         return True
     except Exception as e:
         st.error(f"❌ Erro ao criar usuário: {e}")
@@ -1532,9 +1568,14 @@ def render_new_order_tab() -> None:
         if not produtos_firestore.empty and not setores_firestore.empty:
             data["Produtos"] = produtos_firestore
             data["Setor"] = setores_firestore
+    
+    # Filter setores based on user role
+    current_user = st.session_state.get("current_user")
+    user_info = get_user_info(current_user)
+    setores_df = filter_setores_for_user(data.get("Setor", pd.DataFrame()), user_info)
 
     st.subheader("Novo pedido")
-    render_setor_selector(data.get("Setor", pd.DataFrame()))
+    render_setor_selector(setores_df)
     produto = render_product_selector(data.get("Produtos", pd.DataFrame()))
 
     col_qtd, col_add = st.columns([1, 1])
@@ -1830,18 +1871,36 @@ def render_user_management_tab() -> None:
         with col1:
             new_username = st.text_input("👤 Nome de usuário")
         with col2:
-            new_role = st.selectbox("📌 Função", ["user", "admin"])
+            new_role = st.selectbox("📌 Função", ["user", "admin", "supervisora"])
         
         new_password = st.text_input("🔑 Senha", type="password")
         confirm_password = st.text_input("🔑 Confirmar Senha", type="password")
+        
+        # Setor assignment for supervisora
+        assigned_setores = None
+        if new_role == "supervisora":
+            st.markdown("---")
+            st.markdown("**Setores Vinculados:**")
+            setores_df = st.session_state.excel_data.get("Setor", pd.DataFrame())
+            if not setores_df.empty:
+                available_setores = setores_df["label"].tolist()
+                assigned_setores = st.multiselect(
+                    "Selecione os setores que esta supervisora pode acessar",
+                    options=available_setores,
+                    help="Supervisora verá apenas estes setores"
+                )
+            else:
+                st.warning("⚠️ Carregue a planilha primeiro para selecionar setores.")
         
         if st.button("✅ Criar Usuário", use_container_width=True):
             if not new_username or not new_password:
                 st.error("❌ Usuário e senha são obrigatórios.")
             elif new_password != confirm_password:
                 st.error("❌ As senhas não correspondem.")
+            elif new_role == "supervisora" and not assigned_setores:
+                st.error("❌ Selecione pelo menos um setor para a supervisora.")
             else:
-                if create_user(new_username, new_password, new_role):
+                if create_user(new_username, new_password, new_role, assigned_setores):
                     st.balloons()
     
     # TAB 2: List Users
@@ -1907,16 +1966,150 @@ def render_user_management_tab() -> None:
                 st.write("")  # Placeholder for alignment
 
 
+def render_supervisora_mobile_view(user_info: Dict) -> None:
+    """Mobile-first simplified interface for supervisoras."""
+    st.title("📱 Novo Pedido")
+    st.caption(f"Olá, {st.session_state.get('current_user')}! Crie seu pedido abaixo.")
+    
+    data = st.session_state.excel_data
+    if data is None:
+        st.error("⚠️ Dados não carregados. Contate o administrador.")
+        return
+    
+    setores_df = data.get("Setor", pd.DataFrame())
+    produtos_df = data.get("Produtos", pd.DataFrame())
+    
+    if setores_df.empty or produtos_df.empty:
+        st.error("⚠️ Dados incompletos. Contate o administrador.")
+        return
+    
+    # Filter setores for this supervisora
+    setores_df = filter_setores_for_user(setores_df, user_info)
+    
+    if setores_df.empty:
+        st.warning("⚠️ Nenhum setor vinculado a você. Contate o administrador.")
+        return
+    
+    # Setor selection (full width, large)
+    st.markdown("### 1️⃣ Selecione o Setor")
+    setor_options = setores_df["label"].tolist()
+    selected_setor_label = st.selectbox(
+        "Setor/Cliente",
+        options=setor_options,
+        label_visibility="collapsed"
+    )
+    
+    if selected_setor_label:
+        selected_setor = setores_df[setores_df["label"] == selected_setor_label].iloc[0].to_dict()
+        st.session_state.selected_setor = selected_setor
+        
+        st.divider()
+        
+        # Product list
+        st.markdown("### 2️⃣ Adicione Produtos")
+        
+        # Initialize cart if needed
+        if "cart" not in st.session_state:
+            st.session_state.cart = []
+        
+        # Search box
+        search = st.text_input("🔍 Buscar produto", "", key="search_mobile")
+        
+        # Filter products
+        produtos_filtered = produtos_df.copy()
+        if search:
+            produtos_filtered = produtos_filtered[
+                produtos_filtered["name"].str.contains(search, case=False, na=False) |
+                produtos_filtered["productCode"].astype(str).str.contains(search, case=False, na=False)
+            ]
+        
+        # Show products as cards (mobile-friendly)
+        for _, produto in produtos_filtered.head(10).iterrows():
+            with st.container(border=True):
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.markdown(f"**{produto['name']}**")
+                    st.caption(f"Código: {produto['productCode']} | R$ {produto['price']:.2f}")
+                with col2:
+                    qtde = st.number_input(
+                        "Qtde",
+                        min_value=0,
+                        value=0,
+                        key=f"qtde_mobile_{produto['productCode']}",
+                        label_visibility="collapsed"
+                    )
+                    if qtde > 0:
+                        if st.button("➕", key=f"add_mobile_{produto['productCode']}"):
+                            add_item_to_cart(produto, int(qtde))
+                            st.rerun()
+        
+        # Show cart
+        if st.session_state.cart:
+            st.divider()
+            st.markdown("### 🛒 Carrinho")
+            
+            total = sum(item["total"] for item in st.session_state.cart)
+            st.metric("Total", f"R$ {total:.2f}")
+            
+            for i, item in enumerate(st.session_state.cart):
+                col1, col2, col3 = st.columns([3, 1, 1])
+                with col1:
+                    st.write(f"{item['nome']}")
+                    st.caption(f"{item['qtde']}x R$ {item['preco']:.2f}")
+                with col2:
+                    st.write(f"R$ {item['total']:.2f}")
+                with col3:
+                    if st.button("🗑️", key=f"remove_cart_{i}"):
+                        st.session_state.cart.pop(i)
+                        st.rerun()
+            
+            # Save button
+            st.divider()
+            if st.button("✅ Enviar Pedido", use_container_width=True, type="primary"):
+                save_to_firestore_aguardando(st.session_state.cart, None)
+                st.session_state.cart = []
+                st.success("✅ Pedido enviado para aprovação!")
+                st.balloons()
+                st.rerun()
+
+
 def main() -> None:
     st.set_page_config(page_title="Sistema de Gestão de Pedidos", layout="wide")
     init_session_state()
-    st.title("Sistema de Gestão de Pedidos - Versão Web")
-    st.caption("Interface Streamlit preparada para deploy em serviços como Railway ou Render.")
 
     # Check authentication
     if not check_authentication():
         render_login()
         st.stop()
+    
+    # Get user info
+    current_user = st.session_state.get("current_user")
+    user_info = get_user_info(current_user)
+    
+    # Supervisora gets mobile-first simplified interface
+    if user_info["role"] == "supervisora":
+        # Mobile header with logout
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.caption("📱 Sistema de Pedidos")
+        with col2:
+            if st.button("Sair", key="logout_mobile"):
+                st.session_state.authenticated = False
+                st.session_state.current_user = None
+                st.rerun()
+        
+        render_sidebar()
+        
+        if st.session_state.excel_data is None:
+            st.error("⚠️ Sistema não configurado. Contate o administrador.")
+            st.stop()
+        
+        render_supervisora_mobile_view(user_info)
+        st.stop()
+    
+    # Web interface for user and admin
+    st.title("Sistema de Gestão de Pedidos - Versão Web")
+    st.caption("Interface Streamlit preparada para deploy em serviços como Railway ou Render.")
     
     # Display current user in sidebar
     with st.sidebar:
