@@ -1107,10 +1107,12 @@ def move_approved_to_history(order_docs: List) -> int:
             
             # Get approval info from first item
             first_item = items_list[0][1] if items_list else {}
+            client_name = first_item.get("SETOR2") or first_item.get("client_name")
             
             # Create history record
             history_record = {
                 "Setor": setor,
+                "client_name": client_name,
                 "$ Total": total_value,
                 "created_at": first_item.get("created_at"),
                 "approved_at": first_item.get("approved_at"),
@@ -1591,7 +1593,11 @@ def render_approved_orders_tab() -> None:
         
         # Group by client
         orders_df = pd.DataFrame(orders_list)
-        grouped = orders_df.groupby("Setor")
+        orders_df["client_display"] = orders_df.apply(
+            lambda row: f"{row.get('Setor', 'N/A')} - {row.get('client_name', '')}".strip(" -"),
+            axis=1,
+        )
+        grouped = orders_df.groupby("client_display")
         
         for client, group_df in grouped:
             with st.container(border=True):
@@ -1640,7 +1646,14 @@ def render_approved_orders_tab() -> None:
                             st.divider()
                             col_delete = st.columns([1, 3])
                             with col_delete[0]:
-                                if st.button("🗑️ Deletar", key=f"delete_approved_{order.get('__doc_id')}", help="Somente admin"):
+                                confirm_key = f"confirm_delete_approved_{order.get('__doc_id')}"
+                                confirmed = st.checkbox("Confirmar", key=confirm_key)
+                                if st.button(
+                                    "🗑️ Deletar",
+                                    key=f"delete_approved_{order.get('__doc_id')}",
+                                    help="Somente admin",
+                                    disabled=not confirmed,
+                                ):
                                     db.collection(FIRESTORE_COLLECTION).document(order.get("__doc_id")).delete()
                                     st.success("✅ Pedido deletado com sucesso!")
                                     sync_firestore_to_session()
@@ -1766,6 +1779,20 @@ def render_history_tab() -> None:
                                         st.caption(f"  🔄 {product_name}: {old_qty} → {new_qty}")
                         else:
                             st.write("- Nenhuma alteração registrada")
+
+                        if st.session_state.get("current_user") == "admin":
+                            st.divider()
+                            confirm_key = f"confirm_delete_history_{order.get('__doc_id')}"
+                            confirmed = st.checkbox("Confirmar", key=confirm_key)
+                            if st.button(
+                                "🗑️ Apagar do histórico",
+                                key=f"delete_history_{order.get('__doc_id')}",
+                                help="Remove o pedido do histórico",
+                                disabled=not confirmed,
+                            ):
+                                db.collection("historico_pedidos").document(order.get("__doc_id")).delete()
+                                st.success("✅ Pedido removido do histórico!")
+                                st.rerun()
     
     except Exception as e:
         st.error(f"❌ Erro ao carregar histórico: {e}")
