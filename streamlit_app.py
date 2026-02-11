@@ -247,8 +247,12 @@ def delete_user(username: str) -> bool:
     
     try:
         db = get_firestore_client()
-        db.collection(FIRESTORE_USERS_COLLECTION).document(username).delete()
-        st.success(f"✅ Usuário '{username}' deletado com sucesso!")
+        doc_ref = db.collection(FIRESTORE_USERS_COLLECTION).document(username)
+        doc = doc_ref.get()
+        if not doc.exists:
+            st.error(f"❌ Usuário '{username}' não encontrado.")
+            return False
+        doc_ref.delete()
         log_audit("delete_user", {"username": username})
         return True
     except Exception as e:
@@ -1854,6 +1858,9 @@ def render_user_management_tab() -> None:
         else:
             usernames = [u["username"] for u in users]
             selected_user = st.selectbox("👤 Selecione usuário", usernames)
+
+            if st.session_state.get("user_action_message"):
+                st.success(st.session_state.pop("user_action_message"))
             
             col1, col2, col3 = st.columns([1, 1, 1])
 
@@ -1867,8 +1874,9 @@ def render_user_management_tab() -> None:
                     elif new_pwd != confirm_pwd:
                         st.error("❌ Senhas não correspondem.")
                     else:
-                        update_user_password(selected_user, new_pwd)
-                        st.success("✅ Senha atualizada!")
+                        if update_user_password(selected_user, new_pwd):
+                            st.session_state["user_action_message"] = "✅ Senha atualizada!"
+                            st.rerun()
 
             with col2:
                 st.markdown("**Deletar Usuário**")
@@ -1881,9 +1889,9 @@ def render_user_management_tab() -> None:
                     use_container_width=True,
                     disabled=not confirm_delete,
                 ):
-                    delete_user(selected_user)
-                    st.success("✅ Usuário deletado!")
-                    st.rerun()
+                    if delete_user(selected_user):
+                        st.session_state["user_action_message"] = f"✅ Usuário '{selected_user}' deletado!"
+                        st.rerun()
 
             with col3:
                 st.write("")  # Placeholder for alignment
