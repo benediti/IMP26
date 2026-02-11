@@ -183,13 +183,26 @@ def get_user_info(username: str) -> Dict:
 
 def filter_setores_for_user(setores_df: pd.DataFrame, user_info: Dict) -> pd.DataFrame:
     """Filter setores based on user role and assignments."""
-    if user_info["role"] == "supervisora" and user_info["assigned_setores"]:
-        # Filter only assigned setores
-        filtered = setores_df[setores_df["label"].isin(user_info["assigned_setores"])]
-        return filtered
-    
     # Admin and user see all setores
-    return setores_df
+    if user_info["role"] != "supervisora":
+        return setores_df
+    
+    # Supervisora - filter by assigned setores
+    if not user_info.get("assigned_setores"):
+        return setores_df
+    
+    # Create label column if not exists (needed for filtering)
+    if "label" not in setores_df.columns and "CódUnidade" in setores_df.columns and "items__description" in setores_df.columns:
+        setores_df = setores_df.copy()
+        setores_df["codigo"] = setores_df["CódUnidade"].apply(parse_int)
+        setores_df["descricao"] = setores_df["items__description"].astype(str)
+        setores_df["label"] = setores_df.apply(
+            lambda row: f"{row['codigo']} - {row['descricao']}", axis=1
+        )
+    
+    # Filter only assigned setores
+    filtered = setores_df[setores_df["label"].isin(user_info["assigned_setores"])]
+    return filtered
 
 
 def get_users_list() -> List[Dict]:
@@ -1882,8 +1895,15 @@ def render_user_management_tab() -> None:
             st.markdown("---")
             st.markdown("**Setores Vinculados:**")
             setores_df = st.session_state.excel_data.get("Setor", pd.DataFrame())
-            if not setores_df.empty:
-                available_setores = setores_df["label"].tolist()
+            if not setores_df.empty and "CódUnidade" in setores_df.columns and "items__description" in setores_df.columns:
+                # Create label column like in render_setor_selector
+                setores_temp = setores_df.dropna(subset=["CódUnidade", "items__description"]).copy()
+                setores_temp["codigo"] = setores_temp["CódUnidade"].apply(parse_int)
+                setores_temp["descricao"] = setores_temp["items__description"].astype(str)
+                setores_temp["label"] = setores_temp.apply(
+                    lambda row: f"{row['codigo']} - {row['descricao']}", axis=1
+                )
+                available_setores = setores_temp["label"].tolist()
                 assigned_setores = st.multiselect(
                     "Selecione os setores que esta supervisora pode acessar",
                     options=available_setores,
