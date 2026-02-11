@@ -4,3 +4,4 @@ reportlab>=4.0.0
 streamlit>=1.31.0
 firebase-admin>=6.4.0
 bcrypt>=4.0.0
+streamlit-searchbox>=0.1.7

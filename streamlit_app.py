@@ -7,6 +7,7 @@ from typing import Dict, List, Optional
 import pandas as pd
 import streamlit as st
 import bcrypt
+from streamlit_searchbox import st_searchbox
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from reportlab.lib.pagesizes import A4
@@ -686,12 +687,27 @@ def render_setor_selector(setor_df: pd.DataFrame) -> None:
         except ValueError:
             index = 0
 
-    st.caption("Dica: clique no campo e digite para filtrar.")
-    selected_label = st.selectbox(
-        "2. Selecione o setor/cliente (digite para buscar)",
-        setores["label"].tolist(),
-        index=min(index, len(setores) - 1),
+    if current_label and "search_setor" not in st.session_state:
+        st.session_state["search_setor"] = current_label
+
+    def setor_search(term: str) -> List[str]:
+        if not term:
+            return setores["label"].tolist()[:50]
+        term_lower = term.lower()
+        mask = (
+            setores["descricao"].astype(str).str.lower().str.contains(term_lower)
+            | setores["codigo"].astype(str).str.lower().str.contains(term_lower)
+        )
+        return setores.loc[mask, "label"].tolist()[:50]
+
+    selected_label = st_searchbox(
+        setor_search,
+        key="search_setor",
+        label="2. Selecione o setor/cliente (digite para buscar)",
     )
+    if not selected_label:
+        st.info("Digite para buscar e selecione um setor/cliente.")
+        return
 
     selected_row = setores[setores["label"] == selected_label].iloc[0]
     st.session_state.selected_setor = {
@@ -720,19 +736,31 @@ def render_product_selector(produtos_df: pd.DataFrame) -> Optional[dict]:
     produtos["price"] = pd.to_numeric(produtos.get("price"), errors="coerce").fillna(0.0)
 
     produtos = produtos.sort_values("name")
-    registros = produtos.to_dict("records")
+    produtos["label"] = produtos.apply(
+        lambda row: f"{row['productCode']} - {row['name']}", axis=1
+    )
 
-    if not registros:
-        st.warning("Nenhum produto encontrado com esse filtro.")
+    def produto_search(term: str) -> List[str]:
+        if not term:
+            return produtos["label"].tolist()[:50]
+        term_lower = term.lower()
+        mask = (
+            produtos["name"].astype(str).str.lower().str.contains(term_lower)
+            | produtos["productCode"].astype(str).str.lower().str.contains(term_lower)
+        )
+        return produtos.loc[mask, "label"].tolist()[:50]
+
+    selected_label = st_searchbox(
+        produto_search,
+        key="search_produto",
+        label="Produto (digite para buscar)",
+    )
+    if not selected_label:
+        st.info("Digite para buscar um produto.")
         return None
 
-    st.caption("Dica: clique no campo e digite para filtrar.")
-    selected = st.selectbox(
-        "Produto (digite para buscar)",
-        registros,
-        format_func=lambda item: f"{item['productCode']} - {item['name']}",
-    )
-    return selected
+    selected_row = produtos[produtos["label"] == selected_label].iloc[0]
+    return selected_row.to_dict()
 
 
 def add_item_to_cart(product: dict, quantity: int) -> None:
