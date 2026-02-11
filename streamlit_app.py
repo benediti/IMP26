@@ -1163,6 +1163,20 @@ def render_aguardando_tab() -> None:
                 "$ Total",
                 "Unidade"
             ]].copy()
+            
+            # Fill missing item names from product codes
+            produtos_df_ref = st.session_state.excel_data.get("Produtos", pd.DataFrame()).copy()
+            if not produtos_df_ref.empty:
+                code_to_name_ref = {
+                    str(row['productCode']): str(row['name']) for _, row in produtos_df_ref.iterrows()
+                }
+                items_display["Item"] = items_display.apply(
+                    lambda row: code_to_name_ref.get(str(row['CódProImpakto']), row['Item']) 
+                    if pd.isna(row['Item']) or str(row['Item']).strip() == "" 
+                    else row['Item'],
+                    axis=1
+                )
+            
             items_display.columns = ["📦 Código", "📝 Produto", "🔢 Qtde", "💵 Unit.", "💰 Total", "📐 Un."]
             st.dataframe(items_display, use_container_width=True, hide_index=True)
             
@@ -1173,12 +1187,8 @@ def render_aguardando_tab() -> None:
                 st.caption("Edite o produto e a quantidade e clique em salvar.")
 
                 editor_source = group_df[["CódProImpakto", "Item", "Qtde", "__doc_id"]].copy()
-                editor_source["Produto"] = editor_source.apply(
-                    lambda row: f"{row['CódProImpakto']} - {row['Item']}", axis=1
-                )
-                editor_display = editor_source[["Produto", "Qtde"]].reset_index(drop=True)
-                doc_ids = editor_source["__doc_id"].tolist()
-
+                
+                # Load product data
                 produtos_df = st.session_state.excel_data.get("Produtos", pd.DataFrame()).copy()
                 if not produtos_df.empty:
                     produtos_df["price"] = pd.to_numeric(
@@ -1191,9 +1201,29 @@ def render_aguardando_tab() -> None:
                     produtos_map = {
                         row["label"]: row for _, row in produtos_df.iterrows()
                     }
+                    # Create a map from product code to name for filling missing item names
+                    code_to_name = {
+                        str(row['productCode']): str(row['name']) for _, row in produtos_df.iterrows()
+                    }
                 else:
                     produto_options = []
                     produtos_map = {}
+                    code_to_name = {}
+
+                # Fill missing item names from product codes
+                def get_product_label(row):
+                    codigo = str(row['CódProImpakto'])
+                    nome = row['Item']
+                    
+                    # If nome is empty/NaN, try to get it from the products table
+                    if pd.isna(nome) or str(nome).strip() == "":
+                        nome = code_to_name.get(codigo, "Produto desconhecido")
+                    
+                    return f"{codigo} - {nome}"
+                
+                editor_source["Produto"] = editor_source.apply(get_product_label, axis=1)
+                editor_display = editor_source[["Produto", "Qtde"]].reset_index(drop=True)
+                doc_ids = editor_source["__doc_id"].tolist()
 
                 if produto_options:
                     produto_column = st.column_config.SelectboxColumn(
