@@ -1354,16 +1354,41 @@ def render_approved_orders_tab() -> None:
         db = get_firestore_client()
         
         # Fetch approved orders
-        approved_orders = db.collection(FIRESTORE_COLLECTION)\
-            .where("status", "==", "pedido")\
-            .order_by("approved_at", direction=firestore.Query.DESCENDING)\
-            .stream()
-        
-        orders_list = []
-        for doc in approved_orders:
-            order_data = doc.to_dict()
-            order_data["__doc_id"] = doc.id
-            orders_list.append(order_data)
+        try:
+            approved_orders = db.collection(FIRESTORE_COLLECTION)\
+                .where("status", "==", "pedido")\
+                .order_by("approved_at", direction=firestore.Query.DESCENDING)\
+                .stream()
+
+            orders_list = []
+            for doc in approved_orders:
+                order_data = doc.to_dict()
+                order_data["__doc_id"] = doc.id
+                orders_list.append(order_data)
+        except Exception as exc:
+            st.warning(
+                "⚠️ Índice não encontrado no Firestore. "
+                "Carregando sem ordenação (fallback local)."
+            )
+            approved_orders = db.collection(FIRESTORE_COLLECTION)\
+                .where("status", "==", "pedido")\
+                .stream()
+
+            orders_list = []
+            for doc in approved_orders:
+                order_data = doc.to_dict()
+                order_data["__doc_id"] = doc.id
+                orders_list.append(order_data)
+
+            def sort_key(item: Dict) -> datetime:
+                value = item.get("approved_at")
+                if hasattr(value, "to_datetime"):
+                    return value.to_datetime()
+                if isinstance(value, datetime):
+                    return value
+                return datetime.min
+
+            orders_list.sort(key=sort_key, reverse=True)
         
         if not orders_list:
             st.info("ℹ️ Nenhum pedido aprovado ainda.")
