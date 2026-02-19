@@ -1430,7 +1430,6 @@ def render_aguardando_tab() -> None:
 
                     # Display each item
                     edited_total = 0.0
-                    remove_list = []
                     qtde_dict = {}
                     
                     for i, item in enumerate(edit_data):
@@ -1535,7 +1534,7 @@ def render_aguardando_tab() -> None:
                                 
                                 # Update quantities for existing items
                                 for item in edit_data:
-                                    if not item["is_new"] and item["doc_id"] not in remove_list:
+                                    if not item["is_new"] and item["doc_id"] not in removed_ids:
                                         new_qtde = qtde_dict.get(item["doc_id"], item["qtde"])
                                         new_total = item["preco"] * new_qtde
                                         
@@ -1546,8 +1545,14 @@ def render_aguardando_tab() -> None:
                                         })
                                 
                                 # Add new items to Firestore
-                                setor = st.session_state.selected_setor
-                                if setor:
+                                setor = st.session_state.get("selected_setor")
+                                if not setor and not group_df.empty:
+                                    first_row = group_df.iloc[0]
+                                    setor = {
+                                        "codigo": str(first_row.get("Setor") or first_row.get("Unidade") or ""),
+                                        "descricao": str(first_row.get("SETOR2") or first_row.get("Setor") or "cliente"),
+                                    }
+                                if setor and setor.get("codigo"):
                                     for new_item in st.session_state[f"new_items_{client}"]:
                                         payload = {
                                             "CòdClienteImpakto": COD_CLIENTE_IMPAKTO,
@@ -1566,6 +1571,8 @@ def render_aguardando_tab() -> None:
                                             "updated_at": firestore.SERVER_TIMESTAMP,
                                         }
                                         db.collection(FIRESTORE_COLLECTION).add(payload)
+                                elif st.session_state[f"new_items_{client}"]:
+                                    st.error("Selecione um setor antes de salvar novos itens.")
                                 
                                 # Clear new items
                                 st.session_state[f"new_items_{client}"] = []
