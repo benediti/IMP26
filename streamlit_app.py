@@ -517,6 +517,10 @@ def save_rows_to_firestore(linhas: pd.DataFrame, status: str, pdf_buffer: Option
         client_name = st.session_state.selected_setor.get("descricao", "cliente")
         pdf_path = upload_pdf_to_storage(pdf_buffer, client_name)
 
+    batch = db.batch()
+    op_count = 0
+    max_ops = 450
+
     for _, row in linhas.iterrows():
         payload = {
             "CòdClienteImpakto": row["CòdClienteImpakto"],
@@ -534,7 +538,16 @@ def save_rows_to_firestore(linhas: pd.DataFrame, status: str, pdf_buffer: Option
             "created_at": firestore.SERVER_TIMESTAMP,
             "updated_at": firestore.SERVER_TIMESTAMP,
         }
-        db.collection(FIRESTORE_COLLECTION).add(payload)
+        doc_ref = db.collection(FIRESTORE_COLLECTION).document()
+        batch.set(doc_ref, payload)
+        op_count += 1
+        if op_count >= max_ops:
+            batch.commit()
+            batch = db.batch()
+            op_count = 0
+
+    if op_count:
+        batch.commit()
 
 
 def fetch_collection_df(collection: str, columns: List[str]) -> pd.DataFrame:
@@ -557,11 +570,13 @@ def fetch_collection_df(collection: str, columns: List[str]) -> pd.DataFrame:
     return df
 
 
+@st.cache_data(show_spinner=False, ttl=120)
 def fetch_products_df() -> pd.DataFrame:
     columns = ["productCode", "name", "price"]
     return fetch_collection_df(FIRESTORE_PRODUCTS_COLLECTION, columns)
 
 
+@st.cache_data(show_spinner=False, ttl=120)
 def fetch_setores_df() -> pd.DataFrame:
     columns = ["CódUnidade", "items__description"]
     return fetch_collection_df(FIRESTORE_SETORES_COLLECTION, columns)
@@ -609,6 +624,8 @@ def render_sidebar() -> None:
             st.divider()
             
             if st.button("🔄 Recarregar dados do Firestore", use_container_width=True):
+                fetch_products_df.clear()
+                fetch_setores_df.clear()
                 sync_firestore_to_session()
                 st.toast("Dados recarregados do Firestore.", icon="✅")
 
@@ -638,6 +655,8 @@ def render_sidebar() -> None:
                             setores_df,
                             "CódUnidade",
                         )
+                        fetch_products_df.clear()
+                        fetch_setores_df.clear()
                         sync_firestore_reference_data()
                         st.toast("Produtos e setores enviados ao Firestore.", icon="✅")
         else:
@@ -1527,22 +1546,36 @@ def render_aguardando_tab() -> None:
                         if st.button("💾 Salvar alteracoes", key=f"save_edit_{client}", use_container_width=True):
                             if firestore_enabled():
                                 db = get_firestore_client()
+                                batch = db.batch()
+                                op_count = 0
+                                max_ops = 450
                                 
                                 # Remove items
                                 for doc_id in st.session_state[f"removed_items_{client}"]:
-                                    db.collection(FIRESTORE_COLLECTION).document(doc_id).delete()
+                                    doc_ref = db.collection(FIRESTORE_COLLECTION).document(doc_id)
+                                    batch.delete(doc_ref)
+                                    op_count += 1
+                                    if op_count >= max_ops:
+                                        batch.commit()
+                                        batch = db.batch()
+                                        op_count = 0
                                 
                                 # Update quantities for existing items
                                 for item in edit_data:
                                     if not item["is_new"] and item["doc_id"] not in removed_ids:
                                         new_qtde = qtde_dict.get(item["doc_id"], item["qtde"])
                                         new_total = item["preco"] * new_qtde
-                                        
-                                        db.collection(FIRESTORE_COLLECTION).document(item["doc_id"]).update({
+                                        doc_ref = db.collection(FIRESTORE_COLLECTION).document(item["doc_id"])
+                                        batch.update(doc_ref, {
                                             "Qtde": int(new_qtde),
                                             "$ Total": float(new_total),
                                             "updated_at": firestore.SERVER_TIMESTAMP,
                                         })
+                                        op_count += 1
+                                        if op_count >= max_ops:
+                                            batch.commit()
+                                            batch = db.batch()
+                                            op_count = 0
                                 
                                 # Add new items to Firestore
                                 setor = st.session_state.get("selected_setor")
@@ -1570,9 +1603,18 @@ def render_aguardando_tab() -> None:
                                             "created_at": firestore.SERVER_TIMESTAMP,
                                             "updated_at": firestore.SERVER_TIMESTAMP,
                                         }
-                                        db.collection(FIRESTORE_COLLECTION).add(payload)
+                                        doc_ref = db.collection(FIRESTORE_COLLECTION).document()
+                                        batch.set(doc_ref, payload)
+                                        op_count += 1
+                                        if op_count >= max_ops:
+                                            batch.commit()
+                                            batch = db.batch()
+                                            op_count = 0
                                 elif st.session_state[f"new_items_{client}"]:
                                     st.error("Selecione um setor antes de salvar novos itens.")
+
+                                if op_count:
+                                    batch.commit()
                                 
                                 # Clear new items
                                 st.session_state[f"new_items_{client}"] = []
