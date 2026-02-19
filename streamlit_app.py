@@ -1572,7 +1572,7 @@ def render_aguardando_tab() -> None:
             else:
                 if is_expanded:
                     st.session_state.edit_client = None
-                        st.rerun()
+                    st.rerun()
             
             st.write("")  # Spacing
 
