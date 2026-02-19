@@ -1389,9 +1389,11 @@ def render_aguardando_tab() -> None:
                         produto_options = []
                         produtos_map = {}
 
-                    # Initialize session state for new items
+                    # Initialize session state for new/removed items
                     if f"new_items_{client}" not in st.session_state:
                         st.session_state[f"new_items_{client}"] = []
+                    if f"removed_items_{client}" not in st.session_state:
+                        st.session_state[f"removed_items_{client}"] = []
 
                     # Prepare data for editing
                     edit_data = []
@@ -1424,12 +1426,16 @@ def render_aguardando_tab() -> None:
                             "is_new": True,
                         })
                 
+                    removed_ids = set(st.session_state[f"removed_items_{client}"])
+
                     # Display each item
                     edited_total = 0.0
                     remove_list = []
                     qtde_dict = {}
                     
                     for i, item in enumerate(edit_data):
+                        if item["doc_id"] and item["doc_id"] in removed_ids:
+                            continue
                         col1, col2, col3, col4, col5 = st.columns([2, 1, 1.2, 1, 1])
                         
                         with col1:
@@ -1457,7 +1463,9 @@ def render_aguardando_tab() -> None:
                         with col5:
                             if st.button("🗑️ Remover", key=f"remove_{client}_{i}"):
                                 if item["doc_id"]:
-                                    remove_list.append(item["doc_id"])
+                                    if item["doc_id"] not in st.session_state[f"removed_items_{client}"]:
+                                        st.session_state[f"removed_items_{client}"].append(item["doc_id"])
+                                    st.rerun()
                                 else:
                                     # Remove from new items
                                     idx_to_remove = None
@@ -1522,7 +1530,7 @@ def render_aguardando_tab() -> None:
                                 db = get_firestore_client()
                                 
                                 # Remove items
-                                for doc_id in remove_list:
+                                for doc_id in st.session_state[f"removed_items_{client}"]:
                                     db.collection(FIRESTORE_COLLECTION).document(doc_id).delete()
                                 
                                 # Update quantities for existing items
@@ -1561,6 +1569,7 @@ def render_aguardando_tab() -> None:
                                 
                                 # Clear new items
                                 st.session_state[f"new_items_{client}"] = []
+                                st.session_state[f"removed_items_{client}"] = []
                                 sync_firestore_to_session()
                                 st.success("✅ Alteracoes salvas!")
                                 st.rerun()
@@ -1569,6 +1578,7 @@ def render_aguardando_tab() -> None:
                         if st.button("❌ Cancelar", key=f"cancel_edit_{client}", use_container_width=True):
                             st.session_state.edit_client = None
                             st.session_state[f"new_items_{client}"] = []
+                            st.session_state[f"removed_items_{client}"] = []
             else:
                 if is_expanded:
                     st.session_state.edit_client = None
