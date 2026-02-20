@@ -1320,27 +1320,132 @@ def render_aguardando_tab() -> None:
                 if st.button(f"✅", key=f"approve_{client}", help="Aprovar"):
                     if firestore_enabled():
                         db = get_firestore_client()
-                        for idx in group_df.index:
-                            doc_id = df.loc[idx, "__doc_id"]
-                            original_data = df.loc[idx].to_dict()
+                        batch = db.batch()
+                        op_count = 0
+                        max_ops = 450
+                        
+                        # Check for pending changes
+                        has_new_items = f"new_items_{client}" in st.session_state and st.session_state[f"new_items_{client}"]
+                        has_removed_items = f"removed_items_{client}" in st.session_state and st.session_state[f"removed_items_{client}"]
+                        has_qty_changes = f"qtde_tracking_{client}" in st.session_state and st.session_state[f"qtde_tracking_{client}"]
+                        
+                        # Step 1: Apply pending changes if any
+                        if has_removed_items or has_qty_changes or has_new_items:
+                            # Remove items marked for deletion
+                            if has_removed_items:
+                                for doc_id in st.session_state[f"removed_items_{client}"]:
+                                    doc_ref = db.collection(FIRESTORE_COLLECTION).document(doc_id)
+                                    batch.delete(doc_ref)
+                                    op_count += 1
+                                    if op_count >= max_ops:
+                                        batch.commit()
+                                        batch = db.batch()
+                                        op_count = 0
                             
-                            db.collection(FIRESTORE_COLLECTION).document(doc_id).update({
+                            # Update quantities for existing items
+                            if has_qty_changes:
+                                for doc_id, new_qtde in st.session_state[f"qtde_tracking_{client}"].items():
+                                    # Only update if not marked for deletion
+                                    if not has_removed_items or doc_id not in st.session_state[f"removed_items_{client}"]:
+                                        # Find the price from the original data
+                                        item_row = df[df["__doc_id"] == doc_id]
+                                        if not item_row.empty:
+                                            preco = float(item_row.iloc[0]["$ Unitário"])
+                                            new_total = preco * new_qtde
+                                            doc_ref = db.collection(FIRESTORE_COLLECTION).document(doc_id)
+                                            batch.update(doc_ref, {
+                                                "Qtde": int(new_qtde),
+                                                "$ Total": float(new_total),
+                                                "updated_at": firestore.SERVER_TIMESTAMP,
+                                            })
+                                            op_count += 1
+                                            if op_count >= max_ops:
+                                                batch.commit()
+                                                batch = db.batch()
+                                                op_count = 0
+                            
+                            # Add new items
+                            if has_new_items:
+                                setor = st.session_state.get("selected_setor")
+                                if not setor and not group_df.empty:
+                                    first_row = group_df.iloc[0]
+                                    setor = {
+                                        "codigo": str(first_row.get("Setor") or first_row.get("Unidade") or ""),
+                                        "descricao": str(first_row.get("SETOR2") or first_row.get("Setor") or "cliente"),
+                                    }
+                                if setor and setor.get("codigo"):
+                                    for new_item in st.session_state[f"new_items_{client}"]:
+                                        payload = {
+                                            "CòdClienteImpakto": COD_CLIENTE_IMPAKTO,
+                                            "CódProImpakto": new_item["codigo"],
+                                            "Item": new_item["nome"],
+                                            "Qtde": int(new_item["qtde"]),
+                                            "$ Unitário": float(new_item["preco"]),
+                                            "$ Total": float(new_item["preco"] * new_item["qtde"]),
+                                            "Unidade": setor["codigo"],
+                                            "Setor": setor["codigo"],
+                                            "SETOR2": setor["descricao"],
+                                            "status": "aguardando",  # Will be approved in next step
+                                            "client_name": setor.get("descricao", "cliente"),
+                                            "pdf_path": None,
+                                            "created_at": firestore.SERVER_TIMESTAMP,
+                                            "updated_at": firestore.SERVER_TIMESTAMP,
+                                        }
+                                        doc_ref = db.collection(FIRESTORE_COLLECTION).document()
+                                        batch.set(doc_ref, payload)
+                                        op_count += 1
+                                        if op_count >= max_ops:
+                                            batch.commit()
+                                            batch = db.batch()
+                                            op_count = 0
+                            
+                            # Commit pending changes
+                            if op_count > 0:
+                                batch.commit()
+                                batch = db.batch()
+                                op_count = 0
+                            
+                            # Clear the pending changes from session state
+                            st.session_state[f"new_items_{client}"] = []
+                            st.session_state[f"removed_items_{client}"] = []
+                            if f"qtde_tracking_{client}" in st.session_state:
+                                del st.session_state[f"qtde_tracking_{client}"]
+                        
+                        # Step 2: Now approve ALL items with status "aguardando" for this client
+                        # Re-fetch from Firestore to get current state including newly added items
+                        docs = db.collection(FIRESTORE_COLLECTION).where("SETOR2", "==", client).where("status", "==", "aguardando").stream()
+                        items_to_approve = []
+                        for doc in docs:
+                            items_to_approve.append(doc.id)
+                        
+                        # Approve all items
+                        for doc_id in items_to_approve:
+                            doc_ref = db.collection(FIRESTORE_COLLECTION).document(doc_id)
+                            batch.update(doc_ref, {
                                 "status": "pedido",
                                 "approved_by": st.session_state.get("current_user", "unknown"),
                                 "approved_at": firestore.SERVER_TIMESTAMP,
                                 "updated_at": firestore.SERVER_TIMESTAMP,
                             })
-                            
-                            # Log audit trail
-                            log_audit("order_approved", {
-                                "doc_id": doc_id,
-                                "client": client,
-                                "items_count": len(group_df),
-                                "total_value": group_df["$ Total"].sum(),
-                            })
+                            op_count += 1
+                            if op_count >= max_ops:
+                                batch.commit()
+                                batch = db.batch()
+                                op_count = 0
+                        
+                        # Final commit
+                        if op_count > 0:
+                            batch.commit()
+                        
+                        # Log audit trail
+                        log_audit("order_approved", {
+                            "client": client,
+                            "items_count": len(items_to_approve),
+                            "had_pending_changes": has_new_items or has_removed_items or has_qty_changes,
+                        })
                         
                         sync_firestore_to_session()
-                    st.success(f"✅ Pedido de {client} aprovado! (Usuário: {st.session_state.get('current_user', 'unknown')})")
+                    st.success(f"✅ Pedido de {client} aprovado com todas as alterações! (Usuário: {st.session_state.get('current_user', 'unknown')})")
                     st.rerun()
             
             with col5:
@@ -1451,6 +1556,10 @@ def render_aguardando_tab() -> None:
                     edited_total = 0.0
                     qtde_dict = {}
                     
+                    # Initialize qtde tracking in session state
+                    if f"qtde_tracking_{client}" not in st.session_state:
+                        st.session_state[f"qtde_tracking_{client}"] = {}
+                    
                     for i, item in enumerate(edit_data):
                         if item["doc_id"] and item["doc_id"] in removed_ids:
                             continue
@@ -1460,15 +1569,33 @@ def render_aguardando_tab() -> None:
                             st.markdown(f"**{item['codigo']}** - {item['nome']}")
                         
                         with col2:
+                            # Use session state to preserve qty changes
+                            current_qty_key = f"qtde_{client}_{i}"
+                            if item["doc_id"] and item["doc_id"] in st.session_state[f"qtde_tracking_{client}"]:
+                                default_qty = st.session_state[f"qtde_tracking_{client}"][item["doc_id"]]
+                            else:
+                                default_qty = item["qtde"]
+                            
                             new_qtde = st.number_input(
                                 "Qtde",
                                 min_value=1,
-                                value=item["qtde"],
-                                key=f"qtde_{client}_{i}",
+                                value=default_qty,
+                                key=current_qty_key,
                                 label_visibility="collapsed",
                             )
+                            
+                            # Always track the current quantity
                             if item["doc_id"]:
                                 qtde_dict[item["doc_id"]] = new_qtde
+                                st.session_state[f"qtde_tracking_{client}"][item["doc_id"]] = new_qtde
+                            else:
+                                # For new items, update in the list
+                                for idx, new_item in enumerate(st.session_state[f"new_items_{client}"]):
+                                    if (new_item["codigo"] == item["codigo"] and 
+                                        new_item["nome"] == item["nome"] and
+                                        new_item["preco"] == item["preco"]):
+                                        st.session_state[f"new_items_{client}"][idx]["qtde"] = new_qtde
+                                        break
                         
                         with col3:
                             new_total = item["preco"] * new_qtde
@@ -1483,6 +1610,9 @@ def render_aguardando_tab() -> None:
                                 if item["doc_id"]:
                                     if item["doc_id"] not in st.session_state[f"removed_items_{client}"]:
                                         st.session_state[f"removed_items_{client}"].append(item["doc_id"])
+                                    # Remove from tracking
+                                    if item["doc_id"] in st.session_state[f"qtde_tracking_{client}"]:
+                                        del st.session_state[f"qtde_tracking_{client}"][item["doc_id"]]
                                     st.rerun()
                                 else:
                                     # Remove from new items
@@ -1616,9 +1746,12 @@ def render_aguardando_tab() -> None:
                                 if op_count:
                                     batch.commit()
                                 
-                                # Clear new items
+                                # Clear session state tracking
                                 st.session_state[f"new_items_{client}"] = []
                                 st.session_state[f"removed_items_{client}"] = []
+                                if f"qtde_tracking_{client}" in st.session_state:
+                                    del st.session_state[f"qtde_tracking_{client}"]
+                                
                                 sync_firestore_to_session()
                                 st.success("✅ Alteracoes salvas!")
                                 st.rerun()
@@ -1628,6 +1761,9 @@ def render_aguardando_tab() -> None:
                             st.session_state.edit_client = None
                             st.session_state[f"new_items_{client}"] = []
                             st.session_state[f"removed_items_{client}"] = []
+                            if f"qtde_tracking_{client}" in st.session_state:
+                                del st.session_state[f"qtde_tracking_{client}"]
+                            st.rerun()
             else:
                 if is_expanded:
                     st.session_state.edit_client = None
@@ -2154,8 +2290,7 @@ def render_supervisora_mobile_view(user_info: Dict) -> None:
             # Save button
             st.divider()
             if st.button("✅ Enviar Pedido", use_container_width=True, type="primary"):
-                save_to_firestore_aguardando(st.session_state.cart, None)
-                st.session_state.cart = []
+                persist_cart("Aguardando Aprovação")
                 st.success("✅ Pedido enviado para aprovação!")
                 st.balloons()
                 st.rerun()
