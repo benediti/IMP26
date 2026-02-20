@@ -505,6 +505,36 @@ def upload_pdf_to_storage(pdf_buffer: io.BytesIO, client_name: str) -> Optional[
         return None
 
 
+def get_next_order_number() -> int:
+    """Get the next order number using Firestore transaction."""
+    db = get_firestore_client()
+    if not db:
+        return 1
+    
+    counter_ref = db.collection("counters").document("order_counter")
+    
+    @firestore.transactional
+    def increment_counter(transaction, ref):
+        snapshot = ref.get(transaction=transaction)
+        if snapshot.exists:
+            current = snapshot.to_dict().get("value", 0)
+        else:
+            current = 0
+        
+        next_value = current + 1
+        transaction.set(ref, {"value": next_value})
+        return next_value
+    
+    try:
+        transaction = db.transaction()
+        next_number = increment_counter(transaction, counter_ref)
+        return next_number
+    except Exception as e:
+        st.warning(f"⚠️ Erro ao gerar número de pedido: {e}. Usando timestamp.")
+        # Fallback to timestamp-based number
+        return int(datetime.now().timestamp())
+
+
 def save_rows_to_firestore(linhas: pd.DataFrame, status: str, pdf_buffer: Optional[io.BytesIO] = None) -> None:
     db = get_firestore_client()
     if not db:
@@ -1412,17 +1442,21 @@ def render_aguardando_tab() -> None:
                                 del st.session_state[f"qtde_tracking_{client}"]
                         
                         # Step 2: Now approve ALL items with status "aguardando" for this client
+                        # Generate a unique order number for this approval
+                        order_number = get_next_order_number()
+                        
                         # Re-fetch from Firestore to get current state including newly added items
                         docs = db.collection(FIRESTORE_COLLECTION).where("SETOR2", "==", client).where("status", "==", "aguardando").stream()
                         items_to_approve = []
                         for doc in docs:
                             items_to_approve.append(doc.id)
                         
-                        # Approve all items
+                        # Approve all items with the same order_number
                         for doc_id in items_to_approve:
                             doc_ref = db.collection(FIRESTORE_COLLECTION).document(doc_id)
                             batch.update(doc_ref, {
                                 "status": "pedido",
+                                "order_number": order_number,
                                 "approved_by": st.session_state.get("current_user", "unknown"),
                                 "approved_at": firestore.SERVER_TIMESTAMP,
                                 "updated_at": firestore.SERVER_TIMESTAMP,
@@ -1439,13 +1473,14 @@ def render_aguardando_tab() -> None:
                         
                         # Log audit trail
                         log_audit("order_approved", {
+                            "order_number": order_number,
                             "client": client,
                             "items_count": len(items_to_approve),
                             "had_pending_changes": has_new_items or has_removed_items or has_qty_changes,
                         })
                         
                         sync_firestore_to_session()
-                    st.success(f"✅ Pedido de {client} aprovado com todas as alterações! (Usuário: {st.session_state.get('current_user', 'unknown')})")
+                    st.success(f"✅ Pedido #{order_number} de {client} aprovado com todas as alterações! (Usuário: {st.session_state.get('current_user', 'unknown')})")
                     st.rerun()
             
             with col5:
@@ -1814,7 +1849,7 @@ def render_new_order_tab() -> None:
 
 
 def render_approved_orders_tab() -> None:
-    """Exibe pedidos aprovados com histórico de auditoria completo."""
+    """Exibe pedidos aprovados agrupados por número de pedido."""
     st.subheader("📋 Pedidos Aprovados - Histórico")
     
     try:
@@ -1861,73 +1896,98 @@ def render_approved_orders_tab() -> None:
             st.info("ℹ️ Nenhum pedido aprovado ainda.")
             return
         
-        # Group by client
+        # Convert to DataFrame and group by order_number
         orders_df = pd.DataFrame(orders_list)
-        orders_df["client_display"] = orders_df.apply(
-            lambda row: f"{row.get('Setor', 'N/A')} - {row.get('client_name', '')}".strip(" -"),
-            axis=1,
-        )
-        grouped = orders_df.groupby("client_display")
         
-        for client, group_df in grouped:
+        # For orders without order_number (legacy), use __doc_id as fallback
+        if "order_number" not in orders_df.columns:
+            orders_df["order_number"] = orders_df["__doc_id"]
+        else:
+            orders_df["order_number"] = orders_df["order_number"].fillna(orders_df["__doc_id"])
+        
+        # Group by client first
+        grouped_by_client = orders_df.groupby("SETOR2")
+        
+        st.write(f"**Total: {len(grouped_by_client)} cliente(s) com {len(orders_df.groupby('order_number'))} pedido(s)**")
+        st.divider()
+        
+        for client, client_df in grouped_by_client:
             with st.container(border=True):
-                col1, col2, col3 = st.columns([2, 1, 1])
-                col1.markdown(f"**👤 {client}**")
-                col2.metric("Pedidos", len(group_df))
-                col3.metric("Total", f"R$ {group_df['$ Total'].sum():.2f}")
+                # Group by order_number within each client
+                grouped_by_order = client_df.groupby("order_number")
                 
-                # Display each approved order
-                for idx, order in group_df.iterrows():
-                    with st.expander(f"📦 Pedido #{idx + 1} - Aprovado em {order.get('approved_at', 'N/A')}"):
+                col1, col2, col3 = st.columns([2, 1, 1])
+                col1.markdown(f"### 🏢 {client}")
+                col2.metric("Pedidos", len(grouped_by_order))
+                col3.metric("Total", f"R$ {client_df['$ Total'].sum():.2f}")
+                
+                st.divider()
+                
+                # Display each order (grouped by order_number)
+                for order_num, order_items in grouped_by_order:
+                    # Get order info from first item
+                    first_item = order_items.iloc[0]
+                    approved_at = first_item.get('approved_at', 'N/A')
+                    if hasattr(approved_at, 'to_datetime'):
+                        approved_at = approved_at.to_datetime().strftime('%Y-%m-%d %H:%M:%S')
+                    approved_by = first_item.get('approved_by', 'unknown')
+                    created_at = first_item.get('created_at', 'N/A')
+                    if hasattr(created_at, 'to_datetime'):
+                        created_at = created_at.to_datetime().strftime('%Y-%m-%d %H:%M:%S')
+                    
+                    order_total = order_items['$ Total'].sum()
+                    items_count = len(order_items)
+                    
+                    with st.expander(f"📦 Pedido #{order_num} - {items_count} item(ns) - R$ {order_total:.2f}"):
                         col_info, col_user = st.columns([3, 1])
                         
                         with col_info:
                             st.write("**Informações:**")
-                            st.write(f"- Criado em: {order.get('created_at', 'N/A')}")
-                            st.write(f"- Aprovado em: {order.get('approved_at', 'N/A')}")
-                            st.write(f"- Total: R$ {order.get('$ Total', 0):.2f}")
+                            st.write(f"- 📅 Criado em: {created_at}")
+                            st.write(f"- ✅ Aprovado em: {approved_at}")
+                            st.write(f"- 📦 Itens: {items_count}")
+                            st.write(f"- 💰 Total: R$ {order_total:.2f}")
                         
                         with col_user:
                             st.write("**Aprovado por:**")
-                            st.write(f"👤 {order.get('approved_by', 'unknown')}")
+                            st.write(f"👤 {approved_by}")
                         
-                        # Fetch and display audit trail
-                        st.write("**Histórico de Auditoria:**")
-                        audit_docs = db.collection(FIRESTORE_AUDIT_COLLECTION)\
-                            .where("doc_id", "==", order.get("__doc_id"))\
-                            .stream()
+                        st.divider()
                         
-                        audit_list = []
-                        for audit_doc in audit_docs:
-                            audit_data = audit_doc.to_dict()
-                            audit_list.append(audit_data)
-                        
-                        if audit_list:
-                            audit_df = pd.DataFrame(audit_list)
-                            for _, audit_row in audit_df.iterrows():
-                                st.write(f"- **{audit_row.get('action')}** por {audit_row.get('username')} em {audit_row.get('timestamp')}")
-                                if audit_row.get('details'):
-                                    st.json(audit_row.get('details'))
-                        else:
-                            st.write("- Nenhum registro de auditoria disponível")
+                        # Display items table
+                        st.write("**Itens do Pedido:**")
+                        items_display = order_items[[
+                            "CódProImpakto",
+                            "Item",
+                            "Qtde", 
+                            "$ Unitário",
+                            "$ Total",
+                            "Unidade"
+                        ]].copy()
+                        items_display.columns = ["📦 Código", "📝 Produto", "🔢 Qtde", "💵 Unit.", "💰 Total", "📐 Un."]
+                        st.dataframe(items_display, use_container_width=True, hide_index=True)
                         
                         # Admin delete button
                         if st.session_state.get("current_user") == "admin":
                             st.divider()
                             col_delete = st.columns([1, 3])
                             with col_delete[0]:
-                                confirm_key = f"confirm_delete_approved_{order.get('__doc_id')}"
-                                confirmed = st.checkbox("Confirmar", key=confirm_key)
+                                confirm_key = f"confirm_delete_order_{order_num}"
+                                confirmed = st.checkbox("Confirmar exclusão", key=confirm_key)
                                 if st.button(
-                                    "🗑️ Deletar",
-                                    key=f"delete_approved_{order.get('__doc_id')}",
-                                    help="Somente admin",
+                                    "🗑️ Deletar Pedido",
+                                    key=f"delete_order_{order_num}",
+                                    help="Somente admin - deleta todos os itens deste pedido",
                                     disabled=not confirmed,
                                 ):
-                                    db.collection(FIRESTORE_COLLECTION).document(order.get("__doc_id")).delete()
-                                    st.success("✅ Pedido deletado com sucesso!")
+                                    # Delete all items with this order_number
+                                    for doc_id in order_items["__doc_id"]:
+                                        db.collection(FIRESTORE_COLLECTION).document(doc_id).delete()
+                                    st.success(f"✅ Pedido #{order_num} deletado com sucesso!")
                                     sync_firestore_to_session()
                                     st.rerun()
+                
+                st.write("")  # Spacing
     
     except Exception as e:
         st.error(f"❌ Erro ao carregar pedidos aprovados: {e}")
