@@ -535,6 +535,104 @@ def get_next_order_number() -> int:
         return int(datetime.now().timestamp())
 
 
+def acquire_edit_lock(client_name: str, username: str) -> bool:
+    """Try to acquire an edit lock for a client's order. Returns True if successful."""
+    db = get_firestore_client()
+    if not db:
+        return True  # Allow editing if Firestore is not available
+    
+    try:
+        lock_ref = db.collection("edit_locks").document(client_name)
+        
+        @firestore.transactional
+        def try_lock(transaction, ref):
+            snapshot = ref.get(transaction=transaction)
+            
+            if snapshot.exists:
+                lock_data = snapshot.to_dict()
+                locked_by = lock_data.get("locked_by")
+                locked_at = lock_data.get("locked_at")
+                
+                # Check if lock is stale (older than 10 minutes)
+                if locked_at and hasattr(locked_at, 'to_datetime'):
+                    lock_time = locked_at.to_datetime()
+                    if (datetime.now(timezone.utc) - lock_time).total_seconds() > 600:  # 10 minutes
+                        # Lock is stale, release it
+                        transaction.set(ref, {
+                            "locked_by": username,
+                            "locked_at": firestore.SERVER_TIMESTAMP,
+                        })
+                        return True
+                
+                # Lock exists and is not stale
+                if locked_by == username:
+                    # Same user, refresh the lock
+                    transaction.update(ref, {"locked_at": firestore.SERVER_TIMESTAMP})
+                    return True
+                else:
+                    # Locked by another user
+                    return False
+            else:
+                # No lock exists, create it
+                transaction.set(ref, {
+                    "locked_by": username,
+                    "locked_at": firestore.SERVER_TIMESTAMP,
+                })
+                return True
+        
+        transaction = db.transaction()
+        return try_lock(transaction, lock_ref)
+    except Exception as e:
+        st.warning(f"⚠️ Erro ao adquirir lock: {e}")
+        return True  # Allow editing on error to avoid blocking users
+
+
+def release_edit_lock(client_name: str, username: str) -> None:
+    """Release the edit lock for a client's order."""
+    db = get_firestore_client()
+    if not db:
+        return
+    
+    try:
+        lock_ref = db.collection("edit_locks").document(client_name)
+        snapshot = lock_ref.get()
+        
+        if snapshot.exists:
+            lock_data = snapshot.to_dict()
+            if lock_data.get("locked_by") == username:
+                lock_ref.delete()
+    except Exception as e:
+        # Silent failure - locks will expire anyway
+        pass
+
+
+def get_edit_lock_info(client_name: str) -> Optional[Dict]:
+    """Get information about who is currently editing a client's order."""
+    db = get_firestore_client()
+    if not db:
+        return None
+    
+    try:
+        lock_ref = db.collection("edit_locks").document(client_name)
+        snapshot = lock_ref.get()
+        
+        if snapshot.exists:
+            lock_data = snapshot.to_dict()
+            locked_at = lock_data.get("locked_at")
+            
+            # Check if lock is stale
+            if locked_at and hasattr(locked_at, 'to_datetime'):
+                lock_time = locked_at.to_datetime()
+                if (datetime.now(timezone.utc) - lock_time).total_seconds() > 600:
+                    # Lock is stale, can be ignored
+                    return None
+            
+            return lock_data
+        return None
+    except Exception:
+        return None
+
+
 def save_rows_to_firestore(linhas: pd.DataFrame, status: str, pdf_buffer: Optional[io.BytesIO] = None) -> None:
     db = get_firestore_client()
     if not db:
@@ -1312,7 +1410,17 @@ def render_aguardando_tab() -> None:
     can_edit_aguardando = user_info.get("role") in {"admin", "user"}
 
     df = st.session_state.excel_data.get("Aguardando Aprovação", pd.DataFrame())
-    st.subheader("📋 Pedidos aguardando aprovação")
+    
+    # Header with refresh button
+    col_header1, col_header2 = st.columns([3, 1])
+    with col_header1:
+        st.subheader("📋 Pedidos aguardando aprovação")
+    with col_header2:
+        if st.button("🔄 Atualizar", key="refresh_aguardando", help="Atualizar dados do Firestore"):
+            sync_firestore_to_session()
+            st.success("✅ Dados atualizados!")
+            st.rerun()
+    
     if df.empty:
         st.info("Nenhum item aguardando aprovação.")
         return
@@ -1321,6 +1429,10 @@ def render_aguardando_tab() -> None:
     by_client = df.groupby("SETOR2")
     
     st.write(f"**Total: {len(by_client)} cliente(s) com {len(df)} item(ns)**")
+    
+    # Warning about multi-user editing
+    st.info("💡 **Dica:** Clique em 🔄 Atualizar para ver alterações de outros usuários em tempo real.")
+    
     st.divider()
     
     for client, group_df in by_client:
@@ -1335,16 +1447,36 @@ def render_aguardando_tab() -> None:
             
             # Status badge
             with col2:
-                st.metric("Status", "⏳ Pendente", delta=None)
+                # Check if someone is editing
+                lock_info = get_edit_lock_info(client)
+                if lock_info:
+                    locked_by = lock_info.get("locked_by", "unknown")
+                    st.metric("Status", f"✏️ Editando: {locked_by}", delta=None)
+                else:
+                    st.metric("Status", "⏳ Pendente", delta=None)
             
             # Buttons
             with col3:
                 if can_edit_aguardando:
-                    if st.button("✏️", key=f"edit_{client}", help="Alterar"):
-                        if st.session_state.get("edit_client") == client:
-                            st.session_state.edit_client = None
-                        else:
-                            st.session_state.edit_client = client
+                    # Check if another user is editing
+                    lock_info = get_edit_lock_info(client)
+                    is_locked_by_other = lock_info and lock_info.get("locked_by") != current_user
+                    
+                    if is_locked_by_other:
+                        st.button("🔒", key=f"edit_{client}", help=f"Sendo editado por {lock_info.get('locked_by')}", disabled=True)
+                    else:
+                        if st.button("✏️", key=f"edit_{client}", help="Alterar"):
+                            if st.session_state.get("edit_client") == client:
+                                # Closing edit mode - release lock
+                                release_edit_lock(client, current_user)
+                                st.session_state.edit_client = None
+                            else:
+                                # Opening edit mode - try to acquire lock
+                                if acquire_edit_lock(client, current_user):
+                                    st.session_state.edit_client = client
+                                else:
+                                    st.error(f"❌ Este pedido está sendo editado por outro usuário. Aguarde.")
+                                    st.rerun()
 
             with col4:
                 if st.button(f"✅", key=f"approve_{client}", help="Aprovar"):
@@ -1442,14 +1574,21 @@ def render_aguardando_tab() -> None:
                                 del st.session_state[f"qtde_tracking_{client}"]
                         
                         # Step 2: Now approve ALL items with status "aguardando" for this client
-                        # Generate a unique order number for this approval
-                        order_number = get_next_order_number()
-                        
-                        # Re-fetch from Firestore to get current state including newly added items
+                        # Re-fetch from Firestore to validate items still exist and are in "aguardando" status
                         docs = db.collection(FIRESTORE_COLLECTION).where("SETOR2", "==", client).where("status", "==", "aguardando").stream()
                         items_to_approve = []
                         for doc in docs:
                             items_to_approve.append(doc.id)
+                        
+                        # Check if there are items to approve
+                        if not items_to_approve:
+                            st.warning(f"⚠️ Nenhum item encontrado para aprovar. O pedido pode ter sido aprovado por outro usuário.")
+                            sync_firestore_to_session()
+                            st.rerun()
+                            return
+                        
+                        # Generate a unique order number for this approval
+                        order_number = get_next_order_number()
                         
                         # Approve all items with the same order_number
                         for doc_id in items_to_approve:
@@ -1470,6 +1609,9 @@ def render_aguardando_tab() -> None:
                         # Final commit
                         if op_count > 0:
                             batch.commit()
+                        
+                        # Release any edit lock that might exist
+                        release_edit_lock(client, current_user)
                         
                         # Log audit trail
                         log_audit("order_approved", {
@@ -1781,6 +1923,9 @@ def render_aguardando_tab() -> None:
                                 if op_count:
                                     batch.commit()
                                 
+                                # Release edit lock
+                                release_edit_lock(client, current_user)
+                                
                                 # Clear session state tracking
                                 st.session_state[f"new_items_{client}"] = []
                                 st.session_state[f"removed_items_{client}"] = []
@@ -1793,6 +1938,9 @@ def render_aguardando_tab() -> None:
                     
                     with col_cancel:
                         if st.button("❌ Cancelar", key=f"cancel_edit_{client}", use_container_width=True):
+                            # Release edit lock
+                            release_edit_lock(client, current_user)
+                            
                             st.session_state.edit_client = None
                             st.session_state[f"new_items_{client}"] = []
                             st.session_state[f"removed_items_{client}"] = []
@@ -1801,6 +1949,8 @@ def render_aguardando_tab() -> None:
                             st.rerun()
             else:
                 if is_expanded:
+                    # Release lock if user leaves without proper cancel
+                    release_edit_lock(client, current_user)
                     st.session_state.edit_client = None
                     st.rerun()
             
