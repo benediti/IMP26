@@ -461,6 +461,31 @@ def fetch_firestore_rows(status: Optional[str] = None) -> pd.DataFrame:
     return df
 
 
+def fetch_firestore_rows_raw(status: Optional[str] = None) -> pd.DataFrame:
+    db = get_firestore_client()
+    if not db:
+        return pd.DataFrame()
+
+    query = db.collection(FIRESTORE_COLLECTION)
+    if status:
+        query = query.where("status", "==", status)
+
+    rows = []
+    for doc in query.stream():
+        data = doc.to_dict()
+        data["__doc_id"] = doc.id
+        rows.append(data)
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+    for col in SHEET_CONFIG["Aguardando Aprovação"]:
+        if col not in df.columns:
+            df[col] = None
+    return df
+
+
 def sync_firestore_to_session() -> None:
     if not firestore_enabled():
         return
@@ -533,6 +558,11 @@ def get_next_order_number() -> int:
         st.warning(f"⚠️ Erro ao gerar número de pedido: {e}. Usando timestamp.")
         # Fallback to timestamp-based number
         return int(datetime.now().timestamp())
+
+
+def generate_pending_order_id() -> str:
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
+    return f"pend_{timestamp}_{os.urandom(3).hex()}"
 
 
 def acquire_edit_lock(client_name: str, username: str) -> bool:
@@ -633,7 +663,12 @@ def get_edit_lock_info(client_name: str) -> Optional[Dict]:
         return None
 
 
-def save_rows_to_firestore(linhas: pd.DataFrame, status: str, pdf_buffer: Optional[io.BytesIO] = None) -> None:
+def save_rows_to_firestore(
+    linhas: pd.DataFrame,
+    status: str,
+    pdf_buffer: Optional[io.BytesIO] = None,
+    pending_order_id: Optional[str] = None,
+) -> None:
     db = get_firestore_client()
     if not db:
         return
@@ -644,6 +679,10 @@ def save_rows_to_firestore(linhas: pd.DataFrame, status: str, pdf_buffer: Option
     if pdf_buffer and st.session_state.selected_setor:
         client_name = st.session_state.selected_setor.get("descricao", "cliente")
         pdf_path = upload_pdf_to_storage(pdf_buffer, client_name)
+
+    order_number = get_next_order_number() if status == "pedido" else None
+    if status == "aguardando":
+        pending_order_id = pending_order_id or generate_pending_order_id()
 
     batch = db.batch()
     op_count = 0
@@ -661,6 +700,8 @@ def save_rows_to_firestore(linhas: pd.DataFrame, status: str, pdf_buffer: Option
             "Setor": row["Setor"],
             "SETOR2": row["SETOR2"],
             "status": status,
+            "order_number": order_number,
+            "pending_order_id": pending_order_id,
             "client_name": client_name,
             "pdf_path": pdf_path,
             "created_at": firestore.SERVER_TIMESTAMP,
@@ -1103,7 +1144,8 @@ def persist_cart(destino: str) -> None:
     
     if firestore_enabled():
         status = "aguardando" if destino == "Aguardando Aprovação" else "pedido"
-        save_rows_to_firestore(linhas, status, pdf_buffer)
+        pending_order_id = generate_pending_order_id() if status == "aguardando" else None
+        save_rows_to_firestore(linhas, status, pdf_buffer, pending_order_id)
         sync_firestore_to_session()
     else:
         destino_df = st.session_state.excel_data.get(destino, pd.DataFrame())
@@ -1260,23 +1302,24 @@ def update_excel_snapshot() -> None:
 
 def move_approved_to_history(order_docs: List) -> int:
     """Move approved orders (documents with status='pedido') to history.
-    Groups by Setor and creates a history record for each group.
+    Groups by order_number (fallback to __doc_id for legacy records) and creates
+    one history record per order.
     Returns the count of moved orders."""
     try:
         db = get_firestore_client()
         moved_count = 0
         
-        # Group documents by Setor
-        setor_groups = {}
+        # Group documents by order_number (legacy fallback: doc id)
+        order_groups = {}
         for doc in order_docs:
             order_data = doc.to_dict()
-            setor = order_data.get("Setor", "Unknown")
-            if setor not in setor_groups:
-                setor_groups[setor] = []
-            setor_groups[setor].append((doc.id, order_data))
+            order_key = order_data.get("order_number") or doc.id
+            if order_key not in order_groups:
+                order_groups[order_key] = []
+            order_groups[order_key].append((doc.id, order_data))
         
-        # For each setor group, create a history record
-        for setor, items_list in setor_groups.items():
+        # For each order group, create a history record
+        for order_number, items_list in order_groups.items():
             export_date = datetime.now(timezone.utc)
             
             # Collect items data
@@ -1313,12 +1356,14 @@ def move_approved_to_history(order_docs: List) -> int:
             # Get total value
             total_value = sum(item.get("$ Total", 0) for item in items_data)
             
-            # Get approval info from first item
+            # Get order-level info from first item
             first_item = items_list[0][1] if items_list else {}
+            setor = first_item.get("Setor", "Unknown")
             client_name = first_item.get("SETOR2") or first_item.get("client_name")
             
             # Create history record
             history_record = {
+                "order_number": order_number,
                 "Setor": setor,
                 "client_name": client_name,
                 "$ Total": total_value,
@@ -1334,7 +1379,7 @@ def move_approved_to_history(order_docs: List) -> int:
             # Save to history
             db.collection("historico_pedidos").add(history_record)
             
-            # Delete all items for this setor from pedido_itens
+            # Delete all items for this order from pedido_itens
             for doc_id, _ in items_list:
                 db.collection(FIRESTORE_COLLECTION).document(doc_id).delete()
             
@@ -1345,6 +1390,141 @@ def move_approved_to_history(order_docs: List) -> int:
     except Exception as e:
         st.error(f"❌ Erro ao mover pedidos para histórico: {e}")
         return 0
+
+
+def repair_approved_orders_safe(order_docs: List, apply_changes: bool = False) -> Dict[str, object]:
+    """Safely repair legacy approved items grouping.
+
+    Rules:
+    - Fix items with missing order_number only when pending_order_id exists.
+    - Split mixed order_number groups only when multiple pending_order_id values exist.
+    - Leave ambiguous items (without pending_order_id) unchanged.
+    """
+    result = {
+        "total_approved_items": len(order_docs),
+        "updates_planned": 0,
+        "updated_items": 0,
+        "missing_order_groups_fixed": 0,
+        "mixed_order_groups_split": 0,
+        "unresolved_items": 0,
+        "applied": apply_changes,
+    }
+
+    if not order_docs:
+        return result
+
+    missing_by_pending: Dict[str, List[str]] = {}
+    missing_without_pending: List[str] = []
+    order_to_pending: Dict[str, Dict[str, List[str]]] = {}
+
+    for doc in order_docs:
+        data = doc.to_dict() or {}
+        doc_id = doc.id
+        order_number = data.get("order_number")
+        pending_order_id = str(data.get("pending_order_id") or "").strip()
+
+        if order_number is None or str(order_number).strip() == "":
+            if pending_order_id:
+                missing_by_pending.setdefault(pending_order_id, []).append(doc_id)
+            else:
+                missing_without_pending.append(doc_id)
+            continue
+
+        order_key = str(order_number).strip()
+        if pending_order_id:
+            order_to_pending.setdefault(order_key, {}).setdefault(pending_order_id, []).append(doc_id)
+
+    updates: Dict[str, int] = {}
+
+    for pending_order_id, doc_ids in missing_by_pending.items():
+        new_order_number = get_next_order_number() if apply_changes else 1
+        for doc_id in doc_ids:
+            updates[doc_id] = new_order_number
+
+    split_groups = 0
+    for order_key, pending_map in order_to_pending.items():
+        if len(pending_map) <= 1:
+            continue
+
+        keep_pending = max(pending_map.items(), key=lambda item: len(item[1]))[0]
+        for pending_order_id, doc_ids in pending_map.items():
+            if pending_order_id == keep_pending:
+                continue
+            new_order_number = get_next_order_number() if apply_changes else 1
+            for doc_id in doc_ids:
+                updates[doc_id] = new_order_number
+            split_groups += 1
+
+    result["updates_planned"] = len(updates)
+    result["missing_order_groups_fixed"] = len(missing_by_pending)
+    result["mixed_order_groups_split"] = split_groups
+    result["unresolved_items"] = len(missing_without_pending)
+
+    if not apply_changes or not updates:
+        return result
+
+    try:
+        db = get_firestore_client()
+        if not db:
+            return result
+
+        batch = db.batch()
+        op_count = 0
+        max_ops = 450
+
+        for doc_id, new_order_number in updates.items():
+            doc_ref = db.collection(FIRESTORE_COLLECTION).document(doc_id)
+            batch.update(doc_ref, {
+                "order_number": new_order_number,
+                "updated_at": firestore.SERVER_TIMESTAMP,
+            })
+            op_count += 1
+
+            if op_count >= max_ops:
+                batch.commit()
+                batch = db.batch()
+                op_count = 0
+
+        if op_count > 0:
+            batch.commit()
+
+        result["updated_items"] = len(updates)
+        return result
+    except Exception as exc:
+        st.error(f"❌ Erro ao aplicar correção segura: {exc}")
+        return result
+
+
+def build_ambiguous_approved_items_df(order_docs: List) -> pd.DataFrame:
+    rows = []
+    for doc in order_docs:
+        data = doc.to_dict() or {}
+        pending_order_id = str(data.get("pending_order_id") or "").strip()
+        if pending_order_id:
+            continue
+
+        rows.append(
+            {
+                "__doc_id": doc.id,
+                "SETOR2": data.get("SETOR2"),
+                "Setor": data.get("Setor"),
+                "CódProImpakto": data.get("CódProImpakto"),
+                "Item": data.get("Item"),
+                "Qtde": data.get("Qtde"),
+                "$ Unitário": data.get("$ Unitário"),
+                "$ Total": data.get("$ Total"),
+                "order_number": data.get("order_number"),
+                "approved_at": data.get("approved_at"),
+            }
+        )
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+    if "approved_at" in df.columns:
+        df = df.sort_values(by="approved_at", ascending=False, na_position="last")
+    return df
 
 
 def render_download_section() -> None:
@@ -1386,15 +1566,85 @@ def render_download_section() -> None:
             
             if approved_orders:
                 st.info(f"📊 Existem {len(approved_orders)} item(ns) aprovado(s) aguardando movimentação para histórico.")
-                
-                if st.button("📚 Mover todos os pedidos aprovados para histórico", use_container_width=True):
-                    with st.spinner("Movendo pedidos para histórico..."):
-                        moved_count = move_approved_to_history(approved_orders)
-                        
-                        if moved_count > 0:
-                            st.success(f"✅ {moved_count} pedido(s) movido(s) para histórico com sucesso!")
+
+                analysis = repair_approved_orders_safe(approved_orders, apply_changes=False)
+                if analysis["updates_planned"] > 0 or analysis["unresolved_items"] > 0:
+                    st.caption(
+                        "Correção segura (legado): "
+                        f"{analysis['updates_planned']} item(ns) podem ser ajustados automaticamente; "
+                        f"{analysis['unresolved_items']} item(ns) exigem revisão manual."
+                    )
+
+                ambiguous_df = build_ambiguous_approved_items_df(approved_orders)
+                if not ambiguous_df.empty:
+                    with st.expander(f"🔎 Revisão manual: {len(ambiguous_df)} item(ns) ambíguo(s)", expanded=False):
+                        st.caption("Itens sem pending_order_id. Revise antes de mover para histórico.")
+                        display_df = ambiguous_df.copy()
+                        if "approved_at" in display_df.columns:
+                            display_df["approved_at"] = pd.to_datetime(
+                                display_df["approved_at"], errors="coerce"
+                            ).dt.strftime("%Y-%m-%d %H:%M:%S")
+                        st.dataframe(
+                            display_df[[
+                                "__doc_id",
+                                "SETOR2",
+                                "Setor",
+                                "CódProImpakto",
+                                "Item",
+                                "Qtde",
+                                "$ Unitário",
+                                "$ Total",
+                                "order_number",
+                                "approved_at",
+                            ]],
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+                        st.download_button(
+                            "📥 Baixar lista de itens ambíguos (CSV)",
+                            data=display_df.to_csv(index=False).encode("utf-8-sig"),
+                            file_name=f"itens_ambiguos_aprovados_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                            mime="text/csv",
+                            use_container_width=True,
+                        )
+
+                col_fix, col_move = st.columns(2)
+                with col_fix:
+                    if st.button("🛠️ Corrigir aprovados legados (seguro)", use_container_width=True):
+                        with st.spinner("Aplicando correção segura..."):
+                            repair_result = repair_approved_orders_safe(approved_orders, apply_changes=True)
+
+                        if repair_result["updated_items"] > 0:
+                            st.success(
+                                "✅ Correção aplicada: "
+                                f"{repair_result['updated_items']} item(ns), "
+                                f"{repair_result['mixed_order_groups_split']} grupo(s) dividido(s), "
+                                f"{repair_result['missing_order_groups_fixed']} grupo(s) sem número corrigido(s)."
+                            )
+                            if repair_result["unresolved_items"] > 0:
+                                st.warning(
+                                    f"⚠️ {repair_result['unresolved_items']} item(ns) antigos continuam ambíguos e precisam revisão manual."
+                                )
                             sync_firestore_to_session()
                             st.rerun()
+                        else:
+                            if repair_result["unresolved_items"] > 0:
+                                st.warning(
+                                    "Nenhuma correção automática aplicada. "
+                                    f"{repair_result['unresolved_items']} item(ns) são ambíguos (sem pending_order_id)."
+                                )
+                            else:
+                                st.info("Nenhum ajuste legado necessário.")
+                
+                with col_move:
+                    if st.button("📚 Mover todos os pedidos aprovados para histórico", use_container_width=True):
+                        with st.spinner("Movendo pedidos para histórico..."):
+                            moved_count = move_approved_to_history(approved_orders)
+                            
+                            if moved_count > 0:
+                                st.success(f"✅ {moved_count} pedido(s) movido(s) para histórico com sucesso!")
+                                sync_firestore_to_session()
+                                st.rerun()
             else:
                 st.info("✅ Nenhum pedido aprovado aguardando movimentação.")
         except Exception as e:
@@ -1409,7 +1659,10 @@ def render_aguardando_tab() -> None:
     user_info = get_user_info(current_user)
     can_edit_aguardando = user_info.get("role") in {"admin", "user"}
 
-    df = st.session_state.excel_data.get("Aguardando Aprovação", pd.DataFrame())
+    if firestore_enabled():
+        df = fetch_firestore_rows_raw("aguardando")
+    else:
+        df = st.session_state.excel_data.get("Aguardando Aprovação", pd.DataFrame())
     
     # Header with refresh button
     col_header1, col_header2 = st.columns([3, 1])
@@ -1425,17 +1678,37 @@ def render_aguardando_tab() -> None:
         st.info("Nenhum item aguardando aprovação.")
         return
 
-    # Group by client
-    by_client = df.groupby("SETOR2")
-    
-    st.write(f"**Total: {len(by_client)} cliente(s) com {len(df)} item(ns)**")
+    if "pending_order_id" in df.columns:
+        df["__pending_group"] = df["pending_order_id"].fillna("").astype(str).str.strip()
+        legacy_mask = df["__pending_group"] == ""
+        if legacy_mask.any():
+            df.loc[legacy_mask, "__pending_group"] = (
+                "legacy::"
+                + df.loc[legacy_mask, "SETOR2"].fillna("cliente").astype(str)
+                + "::"
+                + df.loc[legacy_mask, "__doc_id"].astype(str)
+            )
+    else:
+        df["__pending_group"] = (
+            "legacy::"
+            + df["SETOR2"].fillna("cliente").astype(str)
+            + "::"
+            + df["__doc_id"].astype(str)
+        )
+
+    by_order = df.groupby("__pending_group")
+
+    st.write(f"**Total: {len(by_order)} pedido(s) pendente(s) com {len(df)} item(ns)**")
     
     # Warning about multi-user editing
     st.info("💡 **Dica:** Clique em 🔄 Atualizar para ver alterações de outros usuários em tempo real.")
     
     st.divider()
     
-    for client, group_df in by_client:
+    for pending_group, group_df in by_order:
+        client = str(group_df.iloc[0].get("SETOR2") or "cliente")
+        group_id = str(pending_group)
+        group_pending_id = str(group_df.iloc[0].get("pending_order_id") or "").strip()
         # Create card container
         with st.container(border=True):
             col1, col2, col3, col4, col5 = st.columns([2, 1.5, 1, 1, 1])
@@ -1448,7 +1721,7 @@ def render_aguardando_tab() -> None:
             # Status badge
             with col2:
                 # Check if someone is editing
-                lock_info = get_edit_lock_info(client)
+                lock_info = get_edit_lock_info(group_id)
                 if lock_info:
                     locked_by = lock_info.get("locked_by", "unknown")
                     st.metric("Status", f"✏️ Editando: {locked_by}", delta=None)
@@ -1459,27 +1732,27 @@ def render_aguardando_tab() -> None:
             with col3:
                 if can_edit_aguardando:
                     # Check if another user is editing
-                    lock_info = get_edit_lock_info(client)
+                    lock_info = get_edit_lock_info(group_id)
                     is_locked_by_other = lock_info and lock_info.get("locked_by") != current_user
                     
                     if is_locked_by_other:
-                        st.button("🔒", key=f"edit_{client}", help=f"Sendo editado por {lock_info.get('locked_by')}", disabled=True)
+                        st.button("🔒", key=f"edit_{group_id}", help=f"Sendo editado por {lock_info.get('locked_by')}", disabled=True)
                     else:
-                        if st.button("✏️", key=f"edit_{client}", help="Alterar"):
-                            if st.session_state.get("edit_client") == client:
+                        if st.button("✏️", key=f"edit_{group_id}", help="Alterar"):
+                            if st.session_state.get("edit_client") == group_id:
                                 # Closing edit mode - release lock
-                                release_edit_lock(client, current_user)
+                                release_edit_lock(group_id, current_user)
                                 st.session_state.edit_client = None
                             else:
                                 # Opening edit mode - try to acquire lock
-                                if acquire_edit_lock(client, current_user):
-                                    st.session_state.edit_client = client
+                                if acquire_edit_lock(group_id, current_user):
+                                    st.session_state.edit_client = group_id
                                 else:
                                     st.error(f"❌ Este pedido está sendo editado por outro usuário. Aguarde.")
                                     st.rerun()
 
             with col4:
-                if st.button(f"✅", key=f"approve_{client}", help="Aprovar"):
+                if st.button(f"✅", key=f"approve_{group_id}", help="Aprovar"):
                     if firestore_enabled():
                         db = get_firestore_client()
                         batch = db.batch()
@@ -1487,15 +1760,15 @@ def render_aguardando_tab() -> None:
                         max_ops = 450
                         
                         # Check for pending changes
-                        has_new_items = f"new_items_{client}" in st.session_state and st.session_state[f"new_items_{client}"]
-                        has_removed_items = f"removed_items_{client}" in st.session_state and st.session_state[f"removed_items_{client}"]
-                        has_qty_changes = f"qtde_tracking_{client}" in st.session_state and st.session_state[f"qtde_tracking_{client}"]
+                        has_new_items = f"new_items_{group_id}" in st.session_state and st.session_state[f"new_items_{group_id}"]
+                        has_removed_items = f"removed_items_{group_id}" in st.session_state and st.session_state[f"removed_items_{group_id}"]
+                        has_qty_changes = f"qtde_tracking_{group_id}" in st.session_state and st.session_state[f"qtde_tracking_{group_id}"]
                         
                         # Step 1: Apply pending changes if any
                         if has_removed_items or has_qty_changes or has_new_items:
                             # Remove items marked for deletion
                             if has_removed_items:
-                                for doc_id in st.session_state[f"removed_items_{client}"]:
+                                for doc_id in st.session_state[f"removed_items_{group_id}"]:
                                     doc_ref = db.collection(FIRESTORE_COLLECTION).document(doc_id)
                                     batch.delete(doc_ref)
                                     op_count += 1
@@ -1506,9 +1779,9 @@ def render_aguardando_tab() -> None:
                             
                             # Update quantities for existing items
                             if has_qty_changes:
-                                for doc_id, new_qtde in st.session_state[f"qtde_tracking_{client}"].items():
+                                for doc_id, new_qtde in st.session_state[f"qtde_tracking_{group_id}"].items():
                                     # Only update if not marked for deletion
-                                    if not has_removed_items or doc_id not in st.session_state[f"removed_items_{client}"]:
+                                    if not has_removed_items or doc_id not in st.session_state[f"removed_items_{group_id}"]:
                                         # Find the price from the original data
                                         item_row = df[df["__doc_id"] == doc_id]
                                         if not item_row.empty:
@@ -1536,7 +1809,7 @@ def render_aguardando_tab() -> None:
                                         "descricao": str(first_row.get("SETOR2") or first_row.get("Setor") or "cliente"),
                                     }
                                 if setor and setor.get("codigo"):
-                                    for new_item in st.session_state[f"new_items_{client}"]:
+                                    for new_item in st.session_state[f"new_items_{group_id}"]:
                                         payload = {
                                             "CòdClienteImpakto": COD_CLIENTE_IMPAKTO,
                                             "CódProImpakto": new_item["codigo"],
@@ -1548,6 +1821,7 @@ def render_aguardando_tab() -> None:
                                             "Setor": setor["codigo"],
                                             "SETOR2": setor["descricao"],
                                             "status": "aguardando",  # Will be approved in next step
+                                            "pending_order_id": group_pending_id or group_id,
                                             "client_name": setor.get("descricao", "cliente"),
                                             "pdf_path": None,
                                             "created_at": firestore.SERVER_TIMESTAMP,
@@ -1568,17 +1842,35 @@ def render_aguardando_tab() -> None:
                                 op_count = 0
                             
                             # Clear the pending changes from session state
-                            st.session_state[f"new_items_{client}"] = []
-                            st.session_state[f"removed_items_{client}"] = []
-                            if f"qtde_tracking_{client}" in st.session_state:
-                                del st.session_state[f"qtde_tracking_{client}"]
+                            st.session_state[f"new_items_{group_id}"] = []
+                            st.session_state[f"removed_items_{group_id}"] = []
+                            if f"qtde_tracking_{group_id}" in st.session_state:
+                                del st.session_state[f"qtde_tracking_{group_id}"]
                         
-                        # Step 2: Now approve ALL items with status "aguardando" for this client
-                        # Re-fetch from Firestore to validate items still exist and are in "aguardando" status
-                        docs = db.collection(FIRESTORE_COLLECTION).where("SETOR2", "==", client).where("status", "==", "aguardando").stream()
-                        items_to_approve = []
+                        # Step 2: Approve only items from this pending order group
+                        items_to_approve = set()
+                        group_filter = group_pending_id or group_id
+
+                        docs = db.collection(FIRESTORE_COLLECTION).where("pending_order_id", "==", group_filter).where("status", "==", "aguardando").stream()
                         for doc in docs:
-                            items_to_approve.append(doc.id)
+                            items_to_approve.add(doc.id)
+
+                        removed_ids = set(st.session_state.get(f"removed_items_{group_id}", []))
+                        legacy_candidate_ids = [
+                            str(doc_id)
+                            for doc_id in group_df["__doc_id"].tolist()
+                            if str(doc_id) not in removed_ids
+                        ]
+                        for doc_id in legacy_candidate_ids:
+                            if doc_id in items_to_approve:
+                                continue
+                            snapshot = db.collection(FIRESTORE_COLLECTION).document(doc_id).get()
+                            if snapshot.exists:
+                                snapshot_data = snapshot.to_dict() or {}
+                                if snapshot_data.get("status") == "aguardando":
+                                    items_to_approve.add(doc_id)
+
+                        items_to_approve = list(items_to_approve)
                         
                         # Check if there are items to approve
                         if not items_to_approve:
@@ -1611,7 +1903,7 @@ def render_aguardando_tab() -> None:
                             batch.commit()
                         
                         # Release any edit lock that might exist
-                        release_edit_lock(client, current_user)
+                        release_edit_lock(group_id, current_user)
                         
                         # Log audit trail
                         log_audit("order_approved", {
@@ -1626,7 +1918,7 @@ def render_aguardando_tab() -> None:
                     st.rerun()
             
             with col5:
-                if st.button(f"❌", key=f"reject_{client}", help="Rejeitar"):
+                if st.button(f"❌", key=f"reject_{group_id}", help="Rejeitar"):
                     if firestore_enabled():
                         db = get_firestore_client()
                         for idx in group_df.index:
@@ -1666,7 +1958,7 @@ def render_aguardando_tab() -> None:
             st.dataframe(items_display, use_container_width=True, hide_index=True)
             
             # Edit section
-            is_expanded = st.session_state.get("edit_client") == client
+            is_expanded = st.session_state.get("edit_client") == group_id
             if can_edit_aguardando:
                 with st.expander("✏️ Editar pedido", expanded=is_expanded):
                     st.markdown("**Editar itens do pedido:**")
@@ -1691,10 +1983,10 @@ def render_aguardando_tab() -> None:
                         produtos_map = {}
 
                     # Initialize session state for new/removed items
-                    if f"new_items_{client}" not in st.session_state:
-                        st.session_state[f"new_items_{client}"] = []
-                    if f"removed_items_{client}" not in st.session_state:
-                        st.session_state[f"removed_items_{client}"] = []
+                    if f"new_items_{group_id}" not in st.session_state:
+                        st.session_state[f"new_items_{group_id}"] = []
+                    if f"removed_items_{group_id}" not in st.session_state:
+                        st.session_state[f"removed_items_{group_id}"] = []
 
                     # Prepare data for editing
                     edit_data = []
@@ -1716,7 +2008,7 @@ def render_aguardando_tab() -> None:
                         })
                 
                     # Add new items from session state
-                    for new_item in st.session_state[f"new_items_{client}"]:
+                    for new_item in st.session_state[f"new_items_{group_id}"]:
                         edit_data.append({
                             "codigo": new_item["codigo"],
                             "nome": new_item["nome"],
@@ -1727,15 +2019,15 @@ def render_aguardando_tab() -> None:
                             "is_new": True,
                         })
                 
-                    removed_ids = set(st.session_state[f"removed_items_{client}"])
+                    removed_ids = set(st.session_state[f"removed_items_{group_id}"])
 
                     # Display each item
                     edited_total = 0.0
                     qtde_dict = {}
                     
                     # Initialize qtde tracking in session state
-                    if f"qtde_tracking_{client}" not in st.session_state:
-                        st.session_state[f"qtde_tracking_{client}"] = {}
+                    if f"qtde_tracking_{group_id}" not in st.session_state:
+                        st.session_state[f"qtde_tracking_{group_id}"] = {}
                     
                     for i, item in enumerate(edit_data):
                         if item["doc_id"] and item["doc_id"] in removed_ids:
@@ -1747,9 +2039,9 @@ def render_aguardando_tab() -> None:
                         
                         with col2:
                             # Use session state to preserve qty changes
-                            current_qty_key = f"qtde_{client}_{i}"
-                            if item["doc_id"] and item["doc_id"] in st.session_state[f"qtde_tracking_{client}"]:
-                                default_qty = st.session_state[f"qtde_tracking_{client}"][item["doc_id"]]
+                            current_qty_key = f"qtde_{group_id}_{i}"
+                            if item["doc_id"] and item["doc_id"] in st.session_state[f"qtde_tracking_{group_id}"]:
+                                default_qty = st.session_state[f"qtde_tracking_{group_id}"][item["doc_id"]]
                             else:
                                 default_qty = item["qtde"]
                             
@@ -1764,14 +2056,14 @@ def render_aguardando_tab() -> None:
                             # Always track the current quantity
                             if item["doc_id"]:
                                 qtde_dict[item["doc_id"]] = new_qtde
-                                st.session_state[f"qtde_tracking_{client}"][item["doc_id"]] = new_qtde
+                                st.session_state[f"qtde_tracking_{group_id}"][item["doc_id"]] = new_qtde
                             else:
                                 # For new items, update in the list
-                                for idx, new_item in enumerate(st.session_state[f"new_items_{client}"]):
+                                for idx, new_item in enumerate(st.session_state[f"new_items_{group_id}"]):
                                     if (new_item["codigo"] == item["codigo"] and 
                                         new_item["nome"] == item["nome"] and
                                         new_item["preco"] == item["preco"]):
-                                        st.session_state[f"new_items_{client}"][idx]["qtde"] = new_qtde
+                                        st.session_state[f"new_items_{group_id}"][idx]["qtde"] = new_qtde
                                         break
                         
                         with col3:
@@ -1783,25 +2075,25 @@ def render_aguardando_tab() -> None:
                             st.write(f"Unit: R$ {item['preco']:.2f}")
                         
                         with col5:
-                            if st.button("🗑️ Remover", key=f"remove_{client}_{i}"):
+                            if st.button("🗑️ Remover", key=f"remove_{group_id}_{i}"):
                                 if item["doc_id"]:
-                                    if item["doc_id"] not in st.session_state[f"removed_items_{client}"]:
-                                        st.session_state[f"removed_items_{client}"].append(item["doc_id"])
+                                    if item["doc_id"] not in st.session_state[f"removed_items_{group_id}"]:
+                                        st.session_state[f"removed_items_{group_id}"].append(item["doc_id"])
                                     # Remove from tracking
-                                    if item["doc_id"] in st.session_state[f"qtde_tracking_{client}"]:
-                                        del st.session_state[f"qtde_tracking_{client}"][item["doc_id"]]
+                                    if item["doc_id"] in st.session_state[f"qtde_tracking_{group_id}"]:
+                                        del st.session_state[f"qtde_tracking_{group_id}"][item["doc_id"]]
                                     st.rerun()
                                 else:
                                     # Remove from new items
                                     idx_to_remove = None
-                                    for idx, new_item in enumerate(st.session_state[f"new_items_{client}"]):
+                                    for idx, new_item in enumerate(st.session_state[f"new_items_{group_id}"]):
                                         if (new_item["codigo"] == item["codigo"] and 
                                             new_item["nome"] == item["nome"] and
                                             new_item["preco"] == item["preco"]):
                                             idx_to_remove = idx
                                             break
                                     if idx_to_remove is not None:
-                                        st.session_state[f"new_items_{client}"].pop(idx_to_remove)
+                                        st.session_state[f"new_items_{group_id}"].pop(idx_to_remove)
                                     st.rerun()
                 
                     # Add new product button
@@ -1815,7 +2107,7 @@ def render_aguardando_tab() -> None:
                             new_prod_label = st.selectbox(
                                 "Produto",
                                 produto_options,
-                                key=f"new_prod_{client}",
+                                key=f"new_prod_{group_id}",
                                 label_visibility="collapsed",
                             )
                         else:
@@ -1827,12 +2119,12 @@ def render_aguardando_tab() -> None:
                             "Qtde",
                             min_value=1,
                             value=1,
-                            key=f"new_qtde_add_{client}",
+                            key=f"new_qtde_add_{group_id}",
                             label_visibility="collapsed",
                         )
                     
                     with col_add3:
-                        if st.button("➕ Adicionar", key=f"add_item_{client}", use_container_width=True):
+                        if st.button("➕ Adicionar", key=f"add_item_{group_id}", use_container_width=True):
                             if new_prod_label and new_prod_label in produtos_map:
                                 produto = produtos_map[new_prod_label]
                                 new_item = {
@@ -1841,7 +2133,7 @@ def render_aguardando_tab() -> None:
                                     "qtde": int(new_qtde_add),
                                     "preco": float(produto.get("price", 0.0)),
                                 }
-                                st.session_state[f"new_items_{client}"].append(new_item)
+                                st.session_state[f"new_items_{group_id}"].append(new_item)
                                 st.success(f"✅ {new_item['nome']} adicionado!")
                                 st.rerun()
                 
@@ -1850,7 +2142,7 @@ def render_aguardando_tab() -> None:
                     
                     col_save, col_cancel = st.columns(2)
                     with col_save:
-                        if st.button("💾 Salvar alteracoes", key=f"save_edit_{client}", use_container_width=True):
+                        if st.button("💾 Salvar alteracoes", key=f"save_edit_{group_id}", use_container_width=True):
                             if firestore_enabled():
                                 db = get_firestore_client()
                                 batch = db.batch()
@@ -1858,7 +2150,7 @@ def render_aguardando_tab() -> None:
                                 max_ops = 450
                                 
                                 # Remove items
-                                for doc_id in st.session_state[f"removed_items_{client}"]:
+                                for doc_id in st.session_state[f"removed_items_{group_id}"]:
                                     doc_ref = db.collection(FIRESTORE_COLLECTION).document(doc_id)
                                     batch.delete(doc_ref)
                                     op_count += 1
@@ -1893,7 +2185,7 @@ def render_aguardando_tab() -> None:
                                         "descricao": str(first_row.get("SETOR2") or first_row.get("Setor") or "cliente"),
                                     }
                                 if setor and setor.get("codigo"):
-                                    for new_item in st.session_state[f"new_items_{client}"]:
+                                    for new_item in st.session_state[f"new_items_{group_id}"]:
                                         payload = {
                                             "CòdClienteImpakto": COD_CLIENTE_IMPAKTO,
                                             "CódProImpakto": new_item["codigo"],
@@ -1905,6 +2197,7 @@ def render_aguardando_tab() -> None:
                                             "Setor": setor["codigo"],
                                             "SETOR2": setor["descricao"],
                                             "status": "aguardando",
+                                            "pending_order_id": group_pending_id or group_id,
                                             "client_name": setor.get("descricao", "cliente"),
                                             "pdf_path": None,
                                             "created_at": firestore.SERVER_TIMESTAMP,
@@ -1917,40 +2210,40 @@ def render_aguardando_tab() -> None:
                                             batch.commit()
                                             batch = db.batch()
                                             op_count = 0
-                                elif st.session_state[f"new_items_{client}"]:
+                                elif st.session_state[f"new_items_{group_id}"]:
                                     st.error("Selecione um setor antes de salvar novos itens.")
 
                                 if op_count:
                                     batch.commit()
                                 
                                 # Release edit lock
-                                release_edit_lock(client, current_user)
+                                release_edit_lock(group_id, current_user)
                                 
                                 # Clear session state tracking
-                                st.session_state[f"new_items_{client}"] = []
-                                st.session_state[f"removed_items_{client}"] = []
-                                if f"qtde_tracking_{client}" in st.session_state:
-                                    del st.session_state[f"qtde_tracking_{client}"]
+                                st.session_state[f"new_items_{group_id}"] = []
+                                st.session_state[f"removed_items_{group_id}"] = []
+                                if f"qtde_tracking_{group_id}" in st.session_state:
+                                    del st.session_state[f"qtde_tracking_{group_id}"]
                                 
                                 sync_firestore_to_session()
                                 st.success("✅ Alteracoes salvas!")
                                 st.rerun()
                     
                     with col_cancel:
-                        if st.button("❌ Cancelar", key=f"cancel_edit_{client}", use_container_width=True):
+                        if st.button("❌ Cancelar", key=f"cancel_edit_{group_id}", use_container_width=True):
                             # Release edit lock
-                            release_edit_lock(client, current_user)
+                            release_edit_lock(group_id, current_user)
                             
                             st.session_state.edit_client = None
-                            st.session_state[f"new_items_{client}"] = []
-                            st.session_state[f"removed_items_{client}"] = []
-                            if f"qtde_tracking_{client}" in st.session_state:
-                                del st.session_state[f"qtde_tracking_{client}"]
+                            st.session_state[f"new_items_{group_id}"] = []
+                            st.session_state[f"removed_items_{group_id}"] = []
+                            if f"qtde_tracking_{group_id}" in st.session_state:
+                                del st.session_state[f"qtde_tracking_{group_id}"]
                             st.rerun()
             else:
                 if is_expanded:
                     # Release lock if user leaves without proper cancel
-                    release_edit_lock(client, current_user)
+                    release_edit_lock(group_id, current_user)
                     st.session_state.edit_client = None
                     st.rerun()
             
@@ -2185,14 +2478,27 @@ def render_history_tab() -> None:
             st.info("ℹ️ Nenhum pedido no histórico ainda.")
             return
         
-        # Group by client
+        # Group by setor + client name
         orders_df = pd.DataFrame(orders_list)
-        grouped = orders_df.groupby("Setor")
+        if "Setor" not in orders_df.columns:
+            orders_df["Setor"] = "N/A"
+        if "client_name" not in orders_df.columns:
+            orders_df["client_name"] = ""
+
+        orders_df["Setor"] = orders_df["Setor"].fillna("N/A").astype(str)
+        orders_df["client_name"] = orders_df["client_name"].fillna("").astype(str)
+
+        grouped = orders_df.groupby(["Setor", "client_name"], dropna=False)
         
-        for client, group_df in grouped:
+        for (setor_code, client_name), group_df in grouped:
+            setor_label = str(setor_code)
+            client_label = client_name.strip() if isinstance(client_name, str) else ""
+            if not client_label:
+                client_label = "Sem nome"
             with st.container(border=True):
                 col1, col2, col3 = st.columns([2, 1, 1])
-                col1.markdown(f"**👤 {client}**")
+                col1.markdown(f"**👤 Cliente: {client_label}**")
+                col1.caption(f"🏷️ Setor: {setor_label}")
                 col2.metric("Pedidos", len(group_df))
                 col3.metric("Total", f"R$ {group_df['$ Total'].sum():.2f}")
                 
@@ -2202,12 +2508,15 @@ def render_history_tab() -> None:
                     export_date = order.get('export_date', 'N/A')
                     total = order.get('$ Total', 0)
                     
-                    with st.expander(f"📦 Pedido - Exportado em {export_date}"):
+                    with st.expander(
+                        f"📦 Pedido - Cliente: {client_label} - Setor: {setor_label} - Exportado em {export_date}"
+                    ):
                         col_info, col_dates = st.columns([2, 1])
                         
                         with col_info:
                             st.write("**Informações do Pedido:**")
-                            st.write(f"- Cliente/Setor: {client}")
+                            st.write(f"- Cliente: {client_label}")
+                            st.write(f"- Setor: {setor_label}")
                             st.write(f"- Criado em: {created_at}")
                             st.write(f"- Total: R$ {total:.2f}")
                         
