@@ -1,7 +1,7 @@
 import io
 import json
 import os
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Dict, List, Optional
 
 import pandas as pd
@@ -12,7 +12,7 @@ from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 from firebase_admin import credentials, firestore, storage
 import firebase_admin
 
@@ -1372,6 +1372,145 @@ def generate_history_order_pdf(order: Dict, client_label: str, setor_label: str)
     return buffer
 
 
+def coerce_datetime(value: object) -> Optional[datetime]:
+    if hasattr(value, "to_datetime"):
+        value = value.to_datetime()
+    if isinstance(value, datetime):
+        return value
+    if value is None or value == "":
+        return None
+    try:
+        parsed = pd.to_datetime(value, errors="coerce")
+        if pd.isna(parsed):
+            return None
+        if hasattr(parsed, "to_pydatetime"):
+            return parsed.to_pydatetime()
+        return parsed
+    except Exception:
+        return None
+
+
+def format_datetime_display(value: object) -> str:
+    converted = coerce_datetime(value)
+    if converted is None:
+        return str(value) if value else "N/A"
+    return converted.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def extract_date_iso(value: object) -> str:
+    converted = coerce_datetime(value)
+    if converted is None:
+        return ""
+    return converted.strftime("%Y-%m-%d")
+
+
+def parse_iso_date(value: str) -> Optional[date]:
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value.strip(), "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def generate_history_batch_pdf(selected_orders: List[Dict]) -> io.BytesIO:
+    """Generate one printable PDF containing all selected orders (one order per page)."""
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4)
+    styles = getSampleStyleSheet()
+    elements = []
+
+    for idx, order in enumerate(selected_orders):
+        client_label = str(order.get("client_name") or "Sem nome")
+        setor_label = str(order.get("Setor") or "N/A")
+        order_number = str(order.get("order_number") or order.get("__doc_id") or "N/A")
+        items = order.get("items", []) or []
+        total = parse_float(order.get("$ Total"))
+        if not total:
+            total = sum(parse_float(item.get("$ Total")) for item in items)
+
+        title_style = ParagraphStyle(
+            "TituloHistoricoBatch",
+            parent=styles["Heading1"],
+            fontSize=14,
+            alignment=TA_CENTER,
+            textColor=colors.HexColor("#1a1a1a"),
+        )
+        elements.append(Paragraph("<b>HISTÓRICO DE PEDIDO - IMPAKTO</b>", title_style))
+        elements.append(Spacer(1, 10))
+
+        info_table = Table(
+            [
+                ["Pedido:", order_number],
+                ["Cliente:", client_label],
+                ["Setor:", setor_label],
+                ["Criado em:", format_datetime_display(order.get("created_at"))],
+                ["Aprovado em:", format_datetime_display(order.get("approved_at"))],
+                ["Exportado em:", format_datetime_display(order.get("export_date"))],
+                ["Itens:", str(len(items))],
+                ["Total:", format_currency(total)],
+            ],
+            colWidths=[4.2 * 28.35, 9.3 * 28.35],
+        )
+        info_table.setStyle(
+            TableStyle(
+                [
+                    ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
+                    ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+                    ("ALIGN", (0, 0), (0, -1), "RIGHT"),
+                    ("ALIGN", (1, 0), (1, -1), "LEFT"),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                ]
+            )
+        )
+        elements.append(info_table)
+        elements.append(Spacer(1, 10))
+
+        table_data = [["Código", "Produto", "Qtde", "Valor Unit.", "Total", "Un."]]
+        for item in items:
+            table_data.append(
+                [
+                    str(item.get("CódProImpakto", "")),
+                    str(item.get("Item", "")),
+                    str(parse_int(item.get("Qtde"))),
+                    format_currency(parse_float(item.get("$ Unitário"))),
+                    format_currency(parse_float(item.get("$ Total"))),
+                    str(item.get("Unidade", "")),
+                ]
+            )
+        if len(table_data) == 1:
+            table_data.append(["-", "Nenhum item registrado", "", "", "", ""])
+        table_data.append(["", "", "", "TOTAL", format_currency(total), ""])
+
+        items_table = Table(
+            table_data,
+            colWidths=[2.0 * 28.35, 6.6 * 28.35, 1.5 * 28.35, 2.7 * 28.35, 2.7 * 28.35, 1.5 * 28.35],
+        )
+        items_table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2E6EA6")),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                    ("ALIGN", (0, 0), (-1, 0), "CENTER"),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("GRID", (0, 0), (-1, -2), 0.3, colors.grey),
+                    ("ROWBACKGROUNDS", (0, 1), (-1, -2), [colors.white, colors.HexColor("#F7F7F7")]),
+                    ("ALIGN", (2, 1), (-1, -1), "RIGHT"),
+                    ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+                    ("LINEABOVE", (0, -1), (-1, -1), 1.2, colors.black),
+                ]
+            )
+        )
+        elements.append(items_table)
+
+        if idx < len(selected_orders) - 1:
+            elements.append(PageBreak())
+
+    doc.build(elements)
+    buffer.seek(0)
+    return buffer
+
+
 def render_previa_download() -> None:
     pdf_buffer = generate_previa_pdf()
     if pdf_buffer is None:
@@ -2593,7 +2732,7 @@ def render_history_tab() -> None:
             st.info("ℹ️ Nenhum pedido no histórico ainda.")
             return
         
-        # Group by setor + client name
+        # Filters and grouping
         orders_df = pd.DataFrame(orders_list)
         if "Setor" not in orders_df.columns:
             orders_df["Setor"] = "N/A"
@@ -2602,6 +2741,77 @@ def render_history_tab() -> None:
 
         orders_df["Setor"] = orders_df["Setor"].fillna("N/A").astype(str)
         orders_df["client_name"] = orders_df["client_name"].fillna("").astype(str)
+        orders_df["created_datetime"] = orders_df["created_at"].apply(coerce_datetime)
+        orders_df["created_date"] = orders_df["created_datetime"].apply(
+            lambda value: value.date() if isinstance(value, datetime) else None
+        )
+        orders_df["created_date_iso"] = orders_df["created_at"].apply(extract_date_iso)
+
+        filter_col1, filter_col2, filter_col3 = st.columns([2, 1, 1])
+        with filter_col1:
+            created_filter = st.text_input(
+                "🔎 Filtrar por data de criação (YYYY-MM-DD)",
+                placeholder="2026-02-13",
+                key="history_created_date_filter",
+            ).strip()
+        with filter_col2:
+            created_from_filter = st.text_input(
+                "📅 De (YYYY-MM-DD)",
+                placeholder="2026-02-01",
+                key="history_created_date_from_filter",
+            ).strip()
+        with filter_col3:
+            created_to_filter = st.text_input(
+                "📅 Até (YYYY-MM-DD)",
+                placeholder="2026-02-29",
+                key="history_created_date_to_filter",
+            ).strip()
+
+        st.caption("Ex.: 2026-02-13 | Intervalo: De 2026-02-01 Até 2026-02-29")
+
+        if created_filter:
+            orders_df = orders_df[orders_df["created_date_iso"] == created_filter]
+
+        created_from_date = parse_iso_date(created_from_filter) if created_from_filter else None
+        created_to_date = parse_iso_date(created_to_filter) if created_to_filter else None
+
+        if created_from_filter and created_from_date is None:
+            st.warning("⚠️ Data inicial inválida. Use o formato YYYY-MM-DD.")
+            return
+        if created_to_filter and created_to_date is None:
+            st.warning("⚠️ Data final inválida. Use o formato YYYY-MM-DD.")
+            return
+
+        if created_from_date and created_to_date and created_from_date > created_to_date:
+            st.warning("⚠️ A data inicial não pode ser maior que a data final.")
+            return
+
+        if created_from_date:
+            orders_df = orders_df[orders_df["created_date"].notna()]
+            orders_df = orders_df[orders_df["created_date"] >= created_from_date]
+
+        if created_to_date:
+            orders_df = orders_df[orders_df["created_date"].notna()]
+            orders_df = orders_df[orders_df["created_date"] <= created_to_date]
+
+        if orders_df.empty:
+            st.info("ℹ️ Nenhum pedido encontrado para o filtro informado.")
+            return
+
+        filtered_doc_ids = orders_df["__doc_id"].astype(str).tolist()
+        select_col1, select_col2, select_col3 = st.columns([2, 1, 1])
+        with select_col1:
+            mark_all = st.checkbox("Selecionar todos os pedidos filtrados", key="history_mark_all_checkbox")
+        with select_col2:
+            if st.button("Aplicar seleção", key="history_apply_select_all", use_container_width=True):
+                for doc_id in filtered_doc_ids:
+                    st.session_state[f"history_selected_{doc_id}"] = mark_all
+                st.rerun()
+        with select_col3:
+            if st.button("Limpar seleção", key="history_clear_selection", use_container_width=True):
+                for doc_id in filtered_doc_ids:
+                    st.session_state[f"history_selected_{doc_id}"] = False
+                st.rerun()
 
         grouped = orders_df.groupby(["Setor", "client_name"], dropna=False)
         
@@ -2619,13 +2829,19 @@ def render_history_tab() -> None:
                 
                 # Display each history order
                 for idx, order in group_df.iterrows():
-                    created_at = order.get('created_at', 'N/A')
-                    export_date = order.get('export_date', 'N/A')
-                    total = order.get('$ Total', 0)
+                    doc_id = str(order.get('__doc_id'))
+                    created_at = format_datetime_display(order.get('created_at', 'N/A'))
+                    export_date = format_datetime_display(order.get('export_date', 'N/A'))
+                    total = parse_float(order.get('$ Total', 0))
                     
                     with st.expander(
                         f"📦 Pedido - Cliente: {client_label} - Setor: {setor_label} - Exportado em {export_date}"
                     ):
+                        st.checkbox(
+                            "Selecionar este pedido para impressão em lote",
+                            key=f"history_selected_{doc_id}",
+                        )
+
                         col_info, col_dates = st.columns([2, 1])
                         
                         with col_info:
@@ -2637,7 +2853,7 @@ def render_history_tab() -> None:
                         
                         with col_dates:
                             st.write("**Datas:**")
-                            st.write(f"- Aprovado em: {order.get('approved_at', 'N/A')}")
+                            st.write(f"- Aprovado em: {format_datetime_display(order.get('approved_at', 'N/A'))}")
                             st.write(f"- Exportado em: {export_date}")
 
                             pdf_buffer = generate_history_order_pdf(order, client_label, setor_label)
@@ -2648,7 +2864,7 @@ def render_history_tab() -> None:
                                 data=pdf_buffer.getvalue(),
                                 file_name=f"HISTORICO_Pedido_{safe_setor}_{safe_order}.pdf",
                                 mime="application/pdf",
-                                key=f"download_history_pdf_{order.get('__doc_id')}",
+                                key=f"download_history_pdf_{doc_id}",
                                 use_container_width=True,
                             )
                         
@@ -2709,6 +2925,23 @@ def render_history_tab() -> None:
                                 db.collection("historico_pedidos").document(order.get("__doc_id")).delete()
                                 st.success("✅ Pedido removido do histórico!")
                                 st.rerun()
+
+        selected_orders = [
+            order for order in orders_df.to_dict("records")
+            if st.session_state.get(f"history_selected_{str(order.get('__doc_id'))}", False)
+        ]
+        if selected_orders:
+            st.divider()
+            st.success(f"✅ {len(selected_orders)} pedido(s) selecionado(s) para impressão.")
+            batch_pdf = generate_history_batch_pdf(selected_orders)
+            st.download_button(
+                "🖨️ Imprimir selecionados (1 pedido por página)",
+                data=batch_pdf.getvalue(),
+                file_name=f"HISTORICO_Selecionados_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                mime="application/pdf",
+                key="history_download_selected_orders_pdf",
+                use_container_width=True,
+            )
     
     except Exception as e:
         st.error(f"❌ Erro ao carregar histórico: {e}")
