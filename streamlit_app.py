@@ -1404,15 +1404,6 @@ def extract_date_iso(value: object) -> str:
     return converted.strftime("%Y-%m-%d")
 
 
-def parse_iso_date(value: str) -> Optional[date]:
-    if not value:
-        return None
-    try:
-        return datetime.strptime(value.strip(), "%Y-%m-%d").date()
-    except ValueError:
-        return None
-
-
 def generate_history_batch_pdf(selected_orders: List[Dict]) -> io.BytesIO:
     """Generate one printable PDF containing all selected orders (one order per page)."""
     buffer = io.BytesIO()
@@ -2747,40 +2738,46 @@ def render_history_tab() -> None:
         )
         orders_df["created_date_iso"] = orders_df["created_at"].apply(extract_date_iso)
 
-        filter_col1, filter_col2, filter_col3 = st.columns([2, 1, 1])
+        available_dates = [value for value in orders_df["created_date"].tolist() if isinstance(value, date)]
+        default_start = min(available_dates) if available_dates else date.today()
+        default_end = max(available_dates) if available_dates else date.today()
+
+        filter_col1, filter_col2 = st.columns([1, 1])
         with filter_col1:
-            created_filter = st.text_input(
-                "🔎 Filtrar por data de criação (YYYY-MM-DD)",
-                placeholder="2026-02-13",
-                key="history_created_date_filter",
-            ).strip()
+            use_exact_filter = st.checkbox("🔎 Filtrar por data exata", key="history_use_exact_date_filter")
         with filter_col2:
-            created_from_filter = st.text_input(
-                "📅 De (YYYY-MM-DD)",
-                placeholder="2026-02-01",
-                key="history_created_date_from_filter",
-            ).strip()
-        with filter_col3:
-            created_to_filter = st.text_input(
-                "📅 Até (YYYY-MM-DD)",
-                placeholder="2026-02-29",
-                key="history_created_date_to_filter",
-            ).strip()
+            use_range_filter = st.checkbox("📅 Filtrar por intervalo", key="history_use_range_date_filter")
 
-        st.caption("Ex.: 2026-02-13 | Intervalo: De 2026-02-01 Até 2026-02-29")
+        created_exact_date = None
+        if use_exact_filter:
+            created_exact_date = st.date_input(
+                "Data de criação",
+                value=default_end,
+                key="history_created_date_exact_picker",
+                format="YYYY-MM-DD",
+            )
 
-        if created_filter:
-            orders_df = orders_df[orders_df["created_date_iso"] == created_filter]
+        created_from_date = None
+        created_to_date = None
+        if use_range_filter:
+            range_col1, range_col2 = st.columns([1, 1])
+            with range_col1:
+                created_from_date = st.date_input(
+                    "De",
+                    value=default_start,
+                    key="history_created_date_from_picker",
+                    format="YYYY-MM-DD",
+                )
+            with range_col2:
+                created_to_date = st.date_input(
+                    "Até",
+                    value=default_end,
+                    key="history_created_date_to_picker",
+                    format="YYYY-MM-DD",
+                )
 
-        created_from_date = parse_iso_date(created_from_filter) if created_from_filter else None
-        created_to_date = parse_iso_date(created_to_filter) if created_to_filter else None
-
-        if created_from_filter and created_from_date is None:
-            st.warning("⚠️ Data inicial inválida. Use o formato YYYY-MM-DD.")
-            return
-        if created_to_filter and created_to_date is None:
-            st.warning("⚠️ Data final inválida. Use o formato YYYY-MM-DD.")
-            return
+        if created_exact_date:
+            orders_df = orders_df[orders_df["created_date"] == created_exact_date]
 
         if created_from_date and created_to_date and created_from_date > created_to_date:
             st.warning("⚠️ A data inicial não pode ser maior que a data final.")
