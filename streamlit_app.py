@@ -2810,6 +2810,28 @@ def render_history_tab() -> None:
                     st.session_state[f"history_selected_{doc_id}"] = False
                 st.rerun()
 
+        selected_orders = [
+            order for order in orders_df.to_dict("records")
+            if st.session_state.get(f"history_selected_{str(order.get('__doc_id'))}", False)
+        ]
+
+        action_col1, action_col2 = st.columns([1, 2])
+        with action_col1:
+            st.metric("Selecionados", len(selected_orders))
+        with action_col2:
+            if selected_orders:
+                batch_pdf = generate_history_batch_pdf(selected_orders)
+                st.download_button(
+                    "🖨️ Imprimir selecionados (1 pedido por página)",
+                    data=batch_pdf.getvalue(),
+                    file_name=f"HISTORICO_Selecionados_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                    mime="application/pdf",
+                    key="history_download_selected_orders_pdf",
+                    use_container_width=True,
+                )
+            else:
+                st.info("Selecione pedidos (ou clique em Aplicar seleção) para liberar a impressão em lote.")
+
         grouped = orders_df.groupby(["Setor", "client_name"], dropna=False)
         
         for (setor_code, client_name), group_df in grouped:
@@ -2923,23 +2945,6 @@ def render_history_tab() -> None:
                                 st.success("✅ Pedido removido do histórico!")
                                 st.rerun()
 
-        selected_orders = [
-            order for order in orders_df.to_dict("records")
-            if st.session_state.get(f"history_selected_{str(order.get('__doc_id'))}", False)
-        ]
-        if selected_orders:
-            st.divider()
-            st.success(f"✅ {len(selected_orders)} pedido(s) selecionado(s) para impressão.")
-            batch_pdf = generate_history_batch_pdf(selected_orders)
-            st.download_button(
-                "🖨️ Imprimir selecionados (1 pedido por página)",
-                data=batch_pdf.getvalue(),
-                file_name=f"HISTORICO_Selecionados_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
-                mime="application/pdf",
-                key="history_download_selected_orders_pdf",
-                use_container_width=True,
-            )
-    
     except Exception as e:
         st.error(f"❌ Erro ao carregar histórico: {e}")
 
