@@ -1257,6 +1257,121 @@ def generate_previa_pdf() -> Optional[io.BytesIO]:
     return buffer
 
 
+def generate_history_order_pdf(order: Dict, client_label: str, setor_label: str) -> io.BytesIO:
+    """Generate a printable PDF for a single order from history."""
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4)
+    styles = getSampleStyleSheet()
+    elements = []
+
+    title_style = ParagraphStyle(
+        "TituloHistorico",
+        parent=styles["Heading1"],
+        fontSize=15,
+        alignment=TA_CENTER,
+        textColor=colors.HexColor("#1a1a1a"),
+    )
+    elements.append(Paragraph("<b>HISTÓRICO DE PEDIDO - IMPAKTO</b>", title_style))
+    elements.append(Spacer(1, 12))
+
+    order_number = order.get("order_number", "N/A")
+    created_at = order.get("created_at")
+    approved_at = order.get("approved_at")
+    export_date = order.get("export_date")
+
+    def fmt_dt(value: object) -> str:
+        if hasattr(value, "to_datetime"):
+            value = value.to_datetime()
+        if isinstance(value, datetime):
+            return value.strftime("%d/%m/%Y %H:%M")
+        return str(value) if value else "N/A"
+
+    items = order.get("items", []) or []
+    total = parse_float(order.get("$ Total"))
+    if not total:
+        total = sum(parse_float(item.get("$ Total")) for item in items)
+
+    info_table = Table(
+        [
+            ["Pedido:", str(order_number)],
+            ["Cliente:", str(client_label)],
+            ["Setor:", str(setor_label)],
+            ["Criado em:", fmt_dt(created_at)],
+            ["Aprovado em:", fmt_dt(approved_at)],
+            ["Exportado em:", fmt_dt(export_date)],
+            ["Itens:", str(len(items))],
+            ["Total:", format_currency(total)],
+        ],
+        colWidths=[4.2 * 28.35, 9.3 * 28.35],
+    )
+    info_table.setStyle(
+        TableStyle(
+            [
+                ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
+                ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+                ("ALIGN", (0, 0), (0, -1), "RIGHT"),
+                ("ALIGN", (1, 0), (1, -1), "LEFT"),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+            ]
+        )
+    )
+    elements.append(info_table)
+    elements.append(Spacer(1, 12))
+
+    table_data = [["Código", "Produto", "Qtde", "Valor Unit.", "Total", "Un."]]
+    for item in items:
+        table_data.append(
+            [
+                str(item.get("CódProImpakto", "")),
+                str(item.get("Item", "")),
+                str(parse_int(item.get("Qtde"))),
+                format_currency(parse_float(item.get("$ Unitário"))),
+                format_currency(parse_float(item.get("$ Total"))),
+                str(item.get("Unidade", "")),
+            ]
+        )
+
+    if len(table_data) == 1:
+        table_data.append(["-", "Nenhum item registrado", "", "", "", ""])
+
+    table_data.append(["", "", "", "TOTAL", format_currency(total), ""])
+
+    items_table = Table(
+        table_data,
+        colWidths=[2.0 * 28.35, 6.6 * 28.35, 1.5 * 28.35, 2.7 * 28.35, 2.7 * 28.35, 1.5 * 28.35],
+    )
+    items_table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2E6EA6")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("ALIGN", (0, 0), (-1, 0), "CENTER"),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("GRID", (0, 0), (-1, -2), 0.3, colors.grey),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -2), [colors.white, colors.HexColor("#F7F7F7")]),
+                ("ALIGN", (2, 1), (-1, -1), "RIGHT"),
+                ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+                ("LINEABOVE", (0, -1), (-1, -1), 1.2, colors.black),
+            ]
+        )
+    )
+    elements.append(items_table)
+    elements.append(Spacer(1, 10))
+
+    note_style = ParagraphStyle(
+        "NotaHistorico",
+        parent=styles["Normal"],
+        fontSize=9,
+        alignment=TA_CENTER,
+        textColor=colors.HexColor("#666666"),
+    )
+    elements.append(Paragraph("<i>Documento para impressão do histórico de pedidos.</i>", note_style))
+
+    doc.build(elements)
+    buffer.seek(0)
+    return buffer
+
+
 def render_previa_download() -> None:
     pdf_buffer = generate_previa_pdf()
     if pdf_buffer is None:
@@ -2524,6 +2639,18 @@ def render_history_tab() -> None:
                             st.write("**Datas:**")
                             st.write(f"- Aprovado em: {order.get('approved_at', 'N/A')}")
                             st.write(f"- Exportado em: {export_date}")
+
+                            pdf_buffer = generate_history_order_pdf(order, client_label, setor_label)
+                            safe_setor = str(setor_label).replace(" ", "_").replace("/", "-")
+                            safe_order = str(order.get("order_number") or order.get("__doc_id") or "sem_numero")
+                            st.download_button(
+                                "🖨️ Baixar PDF para imprimir",
+                                data=pdf_buffer.getvalue(),
+                                file_name=f"HISTORICO_Pedido_{safe_setor}_{safe_order}.pdf",
+                                mime="application/pdf",
+                                key=f"download_history_pdf_{order.get('__doc_id')}",
+                                use_container_width=True,
+                            )
                         
                         st.divider()
                         
