@@ -1534,6 +1534,59 @@ def normalize_order_items(df: pd.DataFrame) -> pd.DataFrame:
     return grouped
 
 
+def fetch_latest_history_order_items_for_client(setor_desc: str) -> pd.DataFrame:
+    db = get_firestore_client()
+    if not db:
+        return pd.DataFrame()
+
+    try:
+        history_docs = db.collection("historico_pedidos").stream()
+        history_rows = []
+        target_desc = str(setor_desc).strip().lower()
+
+        for doc in history_docs:
+            data = doc.to_dict() or {}
+            client_name = str(data.get("client_name") or data.get("SETOR2") or "").strip().lower()
+            if client_name != target_desc:
+                continue
+
+            approved_dt = coerce_datetime(data.get("approved_at"))
+            export_dt = coerce_datetime(data.get("export_date"))
+            created_dt = coerce_datetime(data.get("created_at"))
+            sort_dt = approved_dt or export_dt or created_dt
+            history_rows.append((sort_dt, data))
+
+        if not history_rows:
+            return pd.DataFrame()
+
+        history_rows.sort(key=lambda item: item[0] or datetime.min, reverse=True)
+        latest_history = history_rows[0][1]
+
+        items = latest_history.get("items", []) or []
+        if not items:
+            return pd.DataFrame()
+
+        rows = []
+        for item in items:
+            rows.append(
+                {
+                    "CódProImpakto": item.get("CódProImpakto"),
+                    "Item": item.get("Item"),
+                    "Qtde": item.get("Qtde"),
+                    "$ Unitário": item.get("$ Unitário"),
+                    "$ Total": item.get("$ Total"),
+                    "approved_at": latest_history.get("approved_at"),
+                    "order_number": latest_history.get("order_number"),
+                    "SETOR2": latest_history.get("client_name"),
+                    "Setor": latest_history.get("Setor"),
+                }
+            )
+
+        return pd.DataFrame(rows)
+    except Exception:
+        return pd.DataFrame()
+
+
 def fetch_latest_approved_order_items_for_setor(setor_codigo: str, setor_desc: str) -> pd.DataFrame:
     if firestore_enabled():
         approved = fetch_firestore_rows_raw("pedido")
@@ -1548,7 +1601,7 @@ def fetch_latest_approved_order_items_for_setor(setor_codigo: str, setor_desc: s
     approved = approved[desc_mask].copy()
 
     if approved.empty:
-        return pd.DataFrame()
+        return fetch_latest_history_order_items_for_client(setor_desc)
 
     approved["__approved_dt"] = approved.get("approved_at").apply(coerce_datetime)
     approved = approved.sort_values("__approved_dt", ascending=False, na_position="last")
