@@ -3440,6 +3440,12 @@ def render_new_order_tab() -> None:
     st.markdown('<div class="bd-card">', unsafe_allow_html=True)
     st.markdown('<div class="bd-card-title"><h3>Selecionar Cliente</h3></div>', unsafe_allow_html=True)
     render_setor_selector(setores_df)
+    has_selected_client = st.session_state.selected_setor is not None
+    if not has_selected_client:
+        st.caption("Selecione o cliente para habilitar a repetição do pedido.")
+    if st.button("🔁 Repetir pedido anterior", use_container_width=True, disabled=not has_selected_client):
+        load_latest_approved_order_into_cart()
+        st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.write("")  # spacing
@@ -3482,9 +3488,6 @@ def render_new_order_tab() -> None:
     with col_right:
         st.markdown('<div class="bd-card">', unsafe_allow_html=True)
         st.markdown('<div class="bd-card-title"><h3>Ações</h3></div>', unsafe_allow_html=True)
-        if st.button("🔁 Repetir pedido anterior", use_container_width=True):
-            load_latest_approved_order_into_cart()
-            st.rerun()
         render_previa_download()
         render_save_buttons()
         st.markdown('</div>', unsafe_allow_html=True)
