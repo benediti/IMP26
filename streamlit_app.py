@@ -2126,7 +2126,8 @@ def generate_previa_pdf() -> Optional[io.BytesIO]:
         if not previous_order.empty and not comparison_df.empty:
             previous_date = coerce_datetime(previous_order.iloc[0].get("approved_at"))
             previous_order_number = previous_order.iloc[0].get("order_number")
-            previous_label = f"Pedido #{previous_order_number}"
+            has_order_number = pd.notna(previous_order_number) and str(previous_order_number).strip().lower() not in {"", "none", "nan"}
+            previous_label = f"Pedido #{previous_order_number}" if has_order_number else "Pedido sem numero"
             if previous_date:
                 previous_label += f" ({previous_date.strftime('%d/%m/%Y %H:%M')})"
 
@@ -2158,25 +2159,47 @@ def generate_previa_pdf() -> Optional[io.BytesIO]:
                     [
                         ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
                         ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+                        ("FONTSIZE", (0, 0), (-1, -1), 10),
                         ("ALIGN", (0, 0), (0, -1), "LEFT"),
                         ("ALIGN", (1, 0), (1, -1), "RIGHT"),
                         ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
                         ("ROWBACKGROUNDS", (0, 0), (-1, -1), [colors.HexColor("#F8FAFC"), colors.white]),
+                        ("TOPPADDING", (0, 0), (-1, -1), 4),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
                     ]
                 )
             )
             elements.append(summary_table)
             elements.append(Spacer(1, 8))
 
+            comparison_header_style = ParagraphStyle(
+                "ComparacaoHeader",
+                parent=styles["Normal"],
+                fontName="Helvetica-Bold",
+                fontSize=8,
+                leading=9,
+                alignment=TA_CENTER,
+                textColor=colors.white,
+            )
+            comparison_cell_style = ParagraphStyle(
+                "ComparacaoCell",
+                parent=styles["Normal"],
+                fontName="Helvetica",
+                fontSize=8,
+                leading=9,
+                alignment=TA_LEFT,
+                textColor=colors.HexColor("#1f2937"),
+            )
+
             comparison_rows = [[
-                "Codigo",
-                "Produto",
-                "Qtde Ant.",
-                "Qtde Atual",
-                "Valor Ant.",
-                "Valor Atual",
-                "Dif. Valor",
-                "Status",
+                Paragraph("Codigo", comparison_header_style),
+                Paragraph("Produto", comparison_header_style),
+                Paragraph("Qtde Ant.", comparison_header_style),
+                Paragraph("Qtde Atual", comparison_header_style),
+                Paragraph("Valor Ant.", comparison_header_style),
+                Paragraph("Valor Atual", comparison_header_style),
+                Paragraph("Dif. Valor", comparison_header_style),
+                Paragraph("Status", comparison_header_style),
             ]]
             for _, row in comparison_df.iterrows():
                 qtde_ant_val = pd.to_numeric(row.get("Qtde Mês Anterior", 0), errors="coerce")
@@ -2194,7 +2217,7 @@ def generate_previa_pdf() -> Optional[io.BytesIO]:
                 comparison_rows.append(
                     [
                         str(row.get("Código", "")),
-                        str(row.get("Produto", ""))[:34],
+                        Paragraph(str(row.get("Produto", "")), comparison_cell_style),
                         str(qtde_ant),
                         str(qtde_atual),
                         format_currency(total_ant),
@@ -2219,7 +2242,7 @@ def generate_previa_pdf() -> Optional[io.BytesIO]:
 
             comparison_table = Table(
                 comparison_rows,
-                colWidths=[1.6 * 28.35, 3.9 * 28.35, 1.4 * 28.35, 1.4 * 28.35, 1.9 * 28.35, 1.9 * 28.35, 1.9 * 28.35, 1.6 * 28.35],
+                colWidths=[1.35 * 28.35, 4.55 * 28.35, 1.2 * 28.35, 1.2 * 28.35, 1.55 * 28.35, 1.55 * 28.35, 1.55 * 28.35, 1.55 * 28.35],
             )
             comparison_table.setStyle(
                 TableStyle(
@@ -2227,16 +2250,20 @@ def generate_previa_pdf() -> Optional[io.BytesIO]:
                         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1E3A8A")),
                         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
                         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                        ("FONTSIZE", (0, 0), (-1, -1), 8),
                         ("ALIGN", (0, 0), (-1, 0), "CENTER"),
                         ("ALIGN", (0, 1), (0, -2), "CENTER"),
                         ("ALIGN", (1, 1), (1, -1), "LEFT"),
                         ("ALIGN", (2, 1), (3, -1), "CENTER"),
                         ("ALIGN", (4, 1), (6, -1), "RIGHT"),
                         ("ALIGN", (7, 1), (7, -1), "CENTER"),
+                        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
                         ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
                         ("ROWBACKGROUNDS", (0, 1), (-1, -2), [colors.white, colors.HexColor("#F8FAFC")]),
                         ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#E2E8F0")),
                         ("FONTNAME", (1, -1), (6, -1), "Helvetica-Bold"),
+                        ("TOPPADDING", (0, 0), (-1, -1), 3),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
                     ]
                 )
             )
