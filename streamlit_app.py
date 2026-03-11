@@ -1526,10 +1526,10 @@ def normalize_order_items(df: pd.DataFrame) -> pd.DataFrame:
     normalized["preco"] = pd.to_numeric(df.get("$ Unitário", 0.0), errors="coerce").fillna(0.0)
     normalized["total"] = pd.to_numeric(df.get("$ Total", 0.0), errors="coerce").fillna(0.0)
 
+    # Preserve input sequence to keep PDF comparison aligned with the new order.
     grouped = (
-        normalized.groupby(["codigo", "nome", "preco"], as_index=False)
+        normalized.groupby(["codigo", "nome", "preco"], as_index=False, sort=False)
         .agg({"qtde": "sum", "total": "sum"})
-        .sort_values(["nome", "codigo"])
     )
     return grouped
 
@@ -1543,12 +1543,13 @@ def fetch_latest_approved_order_items_for_setor(setor_codigo: str, setor_desc: s
     if approved.empty:
         return pd.DataFrame()
 
-    setor_mask = approved.get("Setor", pd.Series(dtype=str)).astype(str).str.strip() == str(setor_codigo).strip()
-    if setor_mask.any():
-        approved = approved[setor_mask].copy()
-    else:
-        desc_mask = approved.get("SETOR2", pd.Series(dtype=str)).astype(str).str.strip().str.lower() == str(setor_desc).strip().lower()
+    # Prefer matching by client description to avoid coupling history lookup to client IDs.
+    desc_mask = approved.get("SETOR2", pd.Series(dtype=str)).astype(str).str.strip().str.lower() == str(setor_desc).strip().lower()
+    if desc_mask.any():
         approved = approved[desc_mask].copy()
+    else:
+        setor_mask = approved.get("Setor", pd.Series(dtype=str)).astype(str).str.strip() == str(setor_codigo).strip()
+        approved = approved[setor_mask].copy()
 
     if approved.empty:
         return pd.DataFrame()
@@ -1593,7 +1594,11 @@ def build_order_comparison(current_items: pd.DataFrame, previous_items: pd.DataF
     prev_map = {str(row["codigo"]): row for _, row in prev_norm.iterrows()}
 
     rows = []
-    all_codes = sorted(set(current_map.keys()).union(prev_map.keys()))
+    current_codes = [str(code) for code in current_norm.get("codigo", pd.Series(dtype=str)).tolist()]
+    previous_codes = [str(code) for code in prev_norm.get("codigo", pd.Series(dtype=str)).tolist()]
+
+    # Show current order items first, then historical-only items, without flipping sequence.
+    all_codes = list(dict.fromkeys(current_codes + previous_codes))
     for code in all_codes:
         cur = current_map.get(code)
         prev = prev_map.get(code)
