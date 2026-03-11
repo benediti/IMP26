@@ -23,6 +23,29 @@ FIRESTORE_SETORES_COLLECTION = "setores"
 FIRESTORE_PDF_BUCKET = "material-basico"
 FIRESTORE_AUDIT_COLLECTION = "audit_trail"
 FIRESTORE_USERS_COLLECTION = "users"
+FIRESTORE_PRODUCT_HISTORY_COLLECTION = "historico_produtos"
+COMPANY_NAME = "IMPAKTO"
+LOGO_CANDIDATE_FILES = [
+    "logo.png",
+    "logo.jpg",
+    "logo.jpeg",
+    "logo.webp",
+    "assets/logo.png",
+    "assets/logo.jpg",
+    "assets/logo.jpeg",
+    "assets/logo.webp",
+]
+AVATAR_CANDIDATE_FILES = [
+    "assets/avatar.png",
+    "assets/avatar.jpg",
+    "assets/avatar.jpeg",
+    "assets/user.png",
+    "assets/user.jpg",
+    "avatar.png",
+    "avatar.jpg",
+    "user.png",
+    "user.jpg",
+]
 ENABLE_PDF_STORAGE = os.getenv("ENABLE_PDF_STORAGE", "false").lower() == "true"  # Disabled by default
 APP_PASSWORD = os.getenv("APP_PASSWORD", "admin123")  # Default for testing
 SESSION_DEFAULTS = {
@@ -36,6 +59,10 @@ SESSION_DEFAULTS = {
     "edit_indices": [],
     "authenticated": False,
     "current_user": None,
+    "layout_mode_new": False,
+    "product_update_changes": pd.DataFrame(),
+    "product_update_df": pd.DataFrame(),
+    "product_update_source": "manual",
 }
 SHEET_CONFIG = {
     "Produtos": None,
@@ -93,7 +120,85 @@ def check_authentication() -> bool:
 def render_login() -> bool:
     """Render login page with Firestore user validation."""
     st.set_page_config(page_title="Sistema de Gestão - Login", layout="centered")
-    st.markdown("# 🔐 Login - Sistema de Gestão de Pedidos")
+    st.markdown(
+        """
+        <style>
+        .stApp {
+            background:
+                radial-gradient(920px 420px at 50% -30%, rgba(255, 255, 255, 0.2), transparent 70%),
+                linear-gradient(180deg, #5b59cc 0%, #4e4db2 100%);
+        }
+
+        [data-testid="stAppViewContainer"] > .main .block-container {
+            max-width: 720px;
+            padding-top: 3rem;
+        }
+
+        [data-testid="stForm"],
+        [data-testid="stVerticalBlock"] > [data-testid="element-container"] {
+            border-radius: 16px;
+        }
+
+        [data-testid="stTextInput"] input {
+            border-radius: 12px !important;
+            border: 1px solid #c7d2fe !important;
+            min-height: 44px;
+            background: #ffffff !important;
+        }
+
+        [data-testid="stTextInput"] input:focus {
+            border-color: #818cf8 !important;
+            box-shadow: 0 0 0 1px #818cf8 !important;
+        }
+
+        .stButton > button,
+        [data-testid="baseButton-primary"] {
+            border-radius: 12px !important;
+            min-height: 44px;
+            border: 1px solid #4e4db2 !important;
+            background: linear-gradient(90deg, #5b59cc 0%, #4e4db2 100%) !important;
+            color: #ffffff !important;
+            font-weight: 600;
+        }
+
+        [data-testid="stAlertContainer"] {
+            border-radius: 12px;
+        }
+
+        .login-title {
+            margin: 0;
+            color: #ffffff;
+            text-align: center;
+            font-size: 2rem;
+            font-weight: 700;
+        }
+
+        .login-subtitle {
+            margin: 0.3rem 0 0.9rem 0;
+            color: rgba(255, 255, 255, 0.92);
+            text-align: center;
+            font-size: 0.96rem;
+        }
+
+        .login-card {
+            background: rgba(255, 255, 255, 0.82);
+            border: 1px solid rgba(255, 255, 255, 0.65);
+            border-radius: 20px;
+            box-shadow: 0 24px 54px rgba(2, 46, 86, 0.2);
+            backdrop-filter: blur(12px);
+            padding: 1rem 1rem 0.9rem 1rem;
+        }
+
+        .login-card hr {
+            border-color: rgba(148, 163, 184, 0.3);
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown('<p class="login-title">🔐 Login</p>', unsafe_allow_html=True)
+    st.markdown('<p class="login-subtitle">Sistema de Gestão de Pedidos</p>', unsafe_allow_html=True)
+    st.markdown('<div class="login-card">', unsafe_allow_html=True)
     st.divider()
     
     col1, col2 = st.columns([1, 1])
@@ -112,6 +217,7 @@ def render_login() -> bool:
             st.error("❌ Usuário ou senha incorretos!")
     
     st.divider()
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 def log_audit(action: str, details: Dict) -> None:
@@ -764,6 +870,169 @@ def upsert_collection_from_df(collection: str, df: pd.DataFrame, key_field: str)
         db.collection(collection).document(doc_id).set(payload)
 
 
+def normalize_products_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame(columns=["productCode", "name", "price"])
+
+    normalized = df.copy()
+    for col in ["productCode", "name", "price"]:
+        if col not in normalized.columns:
+            normalized[col] = None
+
+    normalized = normalized[["productCode", "name", "price"]].copy()
+    normalized["productCode"] = normalized["productCode"].astype(str).str.strip()
+    normalized["name"] = normalized["name"].fillna("").astype(str).str.strip()
+    normalized["price"] = pd.to_numeric(normalized["price"], errors="coerce").fillna(0.0)
+
+    normalized = normalized[normalized["productCode"] != ""]
+    normalized = normalized.drop_duplicates(subset=["productCode"], keep="last")
+    normalized = normalized.sort_values(["name", "productCode"]).reset_index(drop=True)
+    return normalized
+
+
+def compute_product_changes(current_df: pd.DataFrame, incoming_df: pd.DataFrame) -> pd.DataFrame:
+    current = normalize_products_df(current_df)
+    incoming = normalize_products_df(incoming_df)
+
+    current_map = {
+        str(row["productCode"]): row
+        for _, row in current.iterrows()
+    }
+    incoming_map = {
+        str(row["productCode"]): row
+        for _, row in incoming.iterrows()
+    }
+
+    rows = []
+    all_codes = sorted(set(current_map.keys()).union(incoming_map.keys()))
+    for code in all_codes:
+        old = current_map.get(code)
+        new = incoming_map.get(code)
+
+        old_price = float(old.get("price", 0.0)) if old is not None else 0.0
+        new_price = float(new.get("price", 0.0)) if new is not None else 0.0
+        old_name = str(old.get("name", "")) if old is not None else ""
+        new_name = str(new.get("name", "")) if new is not None else ""
+        name = new_name or old_name
+
+        if old is None:
+            change_type = "Novo"
+        elif new is None:
+            change_type = "Removido"
+        elif abs(old_price - new_price) > 0.009:
+            change_type = "Preço Alterado"
+        elif old_name != new_name:
+            change_type = "Nome Alterado"
+        else:
+            continue
+
+        rows.append(
+            {
+                "productCode": code,
+                "name": name,
+                "old_price": old_price,
+                "new_price": new_price,
+                "diff_price": new_price - old_price,
+                "change_type": change_type,
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def save_product_history(changes_df: pd.DataFrame, source_label: str) -> None:
+    if changes_df.empty:
+        return
+
+    username = st.session_state.get("current_user", "unknown")
+    if firestore_enabled():
+        db = get_firestore_client()
+        batch = db.batch()
+        op_count = 0
+        max_ops = 450
+
+        for _, row in changes_df.iterrows():
+            payload = {
+                "productCode": str(row.get("productCode", "")),
+                "name": str(row.get("name", "")),
+                "old_price": float(row.get("old_price", 0.0)),
+                "new_price": float(row.get("new_price", 0.0)),
+                "diff_price": float(row.get("diff_price", 0.0)),
+                "change_type": str(row.get("change_type", "")),
+                "changed_by": username,
+                "source": source_label,
+                "changed_at": firestore.SERVER_TIMESTAMP,
+            }
+            ref = db.collection(FIRESTORE_PRODUCT_HISTORY_COLLECTION).document()
+            batch.set(ref, payload)
+            op_count += 1
+
+            if op_count >= max_ops:
+                batch.commit()
+                batch = db.batch()
+                op_count = 0
+
+        if op_count:
+            batch.commit()
+    else:
+        local_history = st.session_state.get("product_history_local", [])
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        for _, row in changes_df.iterrows():
+            local_history.append(
+                {
+                    "productCode": str(row.get("productCode", "")),
+                    "name": str(row.get("name", "")),
+                    "old_price": float(row.get("old_price", 0.0)),
+                    "new_price": float(row.get("new_price", 0.0)),
+                    "diff_price": float(row.get("diff_price", 0.0)),
+                    "change_type": str(row.get("change_type", "")),
+                    "changed_by": username,
+                    "source": source_label,
+                    "changed_at": now_str,
+                }
+            )
+        st.session_state.product_history_local = local_history
+
+
+def fetch_product_history(limit: int = 300) -> pd.DataFrame:
+    if firestore_enabled():
+        db = get_firestore_client()
+        rows = []
+        try:
+            docs = (
+                db.collection(FIRESTORE_PRODUCT_HISTORY_COLLECTION)
+                .order_by("changed_at", direction=firestore.Query.DESCENDING)
+                .limit(limit)
+                .stream()
+            )
+        except Exception:
+            docs = db.collection(FIRESTORE_PRODUCT_HISTORY_COLLECTION).stream()
+
+        for doc in docs:
+            data = doc.to_dict() or {}
+            data["__doc_id"] = doc.id
+            rows.append(data)
+
+        if not rows:
+            return pd.DataFrame()
+
+        history_df = pd.DataFrame(rows)
+        if "changed_at" in history_df.columns:
+            history_df["changed_at_dt"] = history_df["changed_at"].apply(coerce_datetime)
+            history_df = history_df.sort_values("changed_at_dt", ascending=False, na_position="last")
+        return history_df
+
+    local_history = st.session_state.get("product_history_local", [])
+    if not local_history:
+        return pd.DataFrame()
+
+    history_df = pd.DataFrame(local_history)
+    if "changed_at" in history_df.columns:
+        history_df["changed_at_dt"] = pd.to_datetime(history_df["changed_at"], errors="coerce")
+        history_df = history_df.sort_values("changed_at_dt", ascending=False, na_position="last")
+    return history_df
+
+
 def sync_firestore_reference_data() -> None:
     if not firestore_enabled():
         return
@@ -895,6 +1164,324 @@ def format_currency(value: float) -> str:
     return f"R$ {value:,.2f}".replace(",", "tmp").replace(".", ",").replace("tmp", ".")
 
 
+def apply_layout_theme(use_new_layout: bool) -> None:
+    if not use_new_layout:
+        return
+
+    st.markdown(
+        """
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+    :root{
+      --bg:#F5F7FA;
+      --surface:#FFFFFF;
+      --title:#343C6A;
+      --text:#4F4F4F;
+      --muted:#718EBF;
+      --border:#E6EFF5;
+      --primary:#2D60FF;
+    }
+
+    /* APP */
+    .stApp{
+      background: var(--bg);
+      font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      color: var(--text);
+    }
+
+        .stApp, .stApp *{
+            font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif !important;
+        }
+
+        /* 1) Controla o "respiro" geral do conteúdo */
+        [data-testid="stAppViewContainer"] > .main .block-container{
+            max-width: 1200px;
+            padding-top: 24px;
+            padding-bottom: 32px;
+        }
+
+        /* 2) O maior vilão: o spacing interno automático do Streamlit */
+        [data-testid="stVerticalBlock"]{
+            gap: 14px !important;      /* “grid gap” padrão entre elementos */
+        }
+        [data-testid="stVerticalBlock"] > div{
+            margin: 0 !important;      /* remove margin “fantasma” */
+        }
+
+        /* 3) Títulos do Streamlit têm margem grande. Ajusta isso */
+        h1{ font-size: 28px !important; margin: 0 0 14px 0 !important; font-weight: 700 !important; }
+        h2{ font-size: 20px !important; margin: 0 0 10px 0 !important; font-weight: 700 !important; }
+        h3{ font-size: 18px !important; margin: 0 0 8px 0 !important;  font-weight: 700 !important; }
+
+        p, label, .stMarkdown{ margin: 0 !important; }
+
+        /* 4) Labels do Streamlit (Selectbox/Number/Text) criam “altura extra” */
+        [data-testid="stWidgetLabel"]{
+            margin-bottom: 4px !important;
+            color: #718EBF !important;
+            font-weight: 600 !important;
+            font-size: 13px !important;
+        }
+
+        /* 5) Inputs com altura e radius padrão (BankDash) */
+        [data-testid="stTextInput"] input,
+        [data-testid="stNumberInput"] input{
+            height: 46px !important;
+            border-radius: 12px !important;
+        }
+        [data-testid="stSelectbox"] > div{
+            min-height: 46px !important;
+            border-radius: 12px !important;
+        }
+
+    /* Remove travas / centraliza com max-width (NÃO use min-width fixa) */
+    [data-testid="stAppViewContainer"] > .main .block-container{
+      max-width: 1200px;
+      padding-top: 24px;
+      padding-bottom: 32px;
+    }
+
+    /* SIDEBAR - BankDash é clara */
+    section[data-testid="stSidebar"]{
+      background: var(--surface) !important;
+      border-right: 1px solid var(--border);
+    }
+    section[data-testid="stSidebar"] *{
+      color: var(--title);
+    }
+
+    /* TOPBAR */
+    .dashboard-topbar{
+      height: 88px;
+      display:flex;
+      align-items:center;
+      gap:16px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 0 24px;
+      margin: -24px -24px 24px -24px; /* encosta na borda do container */
+      border-radius: 18px;
+    }
+
+    .dashboard-title{
+      margin:0;
+      font-size:20px;
+      font-weight:600;
+      color:var(--title);
+    }
+
+    /* Search input estilo BankDash */
+    [data-testid="stTextInput"] input{
+      background: var(--bg) !important;
+      border: 1px solid transparent !important;
+      border-radius: 999px !important;
+      height: 46px !important;
+      padding-left: 16px !important;
+    }
+    [data-testid="stTextInput"] input:focus{
+      border-color: #D9E3EF !important;
+      box-shadow: 0 0 0 3px rgba(45,96,255,.12) !important;
+    }
+
+    /* Buttons redondinhos */
+    .dashboard-topbar .stButton > button{
+      width:46px !important;
+      height:46px !important;
+      border-radius:999px !important;
+      background: var(--bg) !important;
+      border: 1px solid var(--border) !important;
+      box-shadow:none !important;
+      padding:0 !important;
+    }
+
+    /* Cards padrão */
+    .bd-card{
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 18px;
+    }
+
+    /* Títulos */
+    h1,h2,h3{
+      color: var(--title) !important;
+      letter-spacing: -0.01em;
+    }
+    .bd-page-title{
+      font-size: 28px;
+      font-weight: 700;
+      color: var(--title);
+      margin: 8px 0 18px 0;
+    }
+    .bd-section-title{
+      font-size: 20px;
+      font-weight: 700;
+      color: var(--title);
+      margin: 0 0 10px 0;
+    }
+
+    /* Dataframe arredondado */
+    [data-testid="stDataFrame"]{
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      overflow: hidden;
+      background: var(--surface);
+    }
+
+        /* ====== BANKDASH CARD LAYOUT ====== */
+        .bd-card{
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            padding: 22px 22px;
+        }
+
+        /* Remove espaços gigantes dentro do card (Streamlit coloca margem grande) */
+        .bd-card .stMarkdown, .bd-card .stText, .bd-card .stCaption, .bd-card .stAlert{
+            margin-top: 0 !important;
+        }
+        .bd-card [data-testid="stVerticalBlock"]{
+            gap: 10px !important; /* controla espaçamento interno */
+        }
+
+        /* Título do card tipo BankDash */
+        .bd-card-title{
+            display:flex;
+            align-items:center;
+            justify-content:space-between;
+            margin-bottom: 10px;
+        }
+        .bd-card-title h3{
+            font-size: 18px;
+            font-weight: 700;
+            color: var(--title);
+            margin: 0;
+        }
+
+        /* Inputs padrão mais "clean" */
+        [data-testid="stTextInput"] input,
+        [data-testid="stNumberInput"] input{
+            background: #F5F7FA !important;
+            border: 1px solid #E6EFF5 !important;
+            border-radius: 12px !important;
+            height: 46px !important;
+        }
+        [data-testid="stTextInput"] input:focus,
+        [data-testid="stNumberInput"] input:focus{
+            border-color: #D9E3EF !important;
+            box-shadow: 0 0 0 3px rgba(45,96,255,.10) !important;
+        }
+
+        /* Selectbox */
+        [data-testid="stSelectbox"] > div{
+            background: #F5F7FA !important;
+            border: 1px solid #E6EFF5 !important;
+            border-radius: 12px !important;
+            min-height: 46px !important;
+        }
+
+        /* Botão primário BankDash */
+        .bd-primary .stButton > button{
+            background: var(--primary) !important;
+            border: 1px solid var(--primary) !important;
+            color: white !important;
+            border-radius: 12px !important;
+            height: 46px !important;
+            font-weight: 700 !important;
+        }
+
+        /* Botão secundário */
+        .bd-secondary .stButton > button{
+            background: #F5F7FA !important;
+            border: 1px solid #E6EFF5 !important;
+            color: var(--title) !important;
+            border-radius: 12px !important;
+            height: 46px !important;
+            font-weight: 600 !important;
+        }
+
+        /* Mini tabela do carrinho (colunas) */
+        .bd-table-head{
+            font-size: 12px;
+            color: var(--muted);
+            font-weight: 700;
+            text-transform: uppercase;
+        }
+        .bd-divider{
+            height: 1px;
+            background: var(--border);
+            margin: 10px 0 12px 0;
+        }
+
+    </style>
+    """,
+        unsafe_allow_html=True,
+    )
+
+
+def get_company_logo_path() -> Optional[str]:
+    base_dir = os.path.dirname(__file__)
+    for relative_path in LOGO_CANDIDATE_FILES:
+        logo_path = os.path.join(base_dir, relative_path)
+        if os.path.exists(logo_path):
+            return logo_path
+    return None
+
+
+def render_company_branding() -> None:
+    logo_path = get_company_logo_path()
+    if logo_path:
+        st.image(logo_path, use_container_width=True)
+    else:
+        st.markdown(f"### 🏢 {COMPANY_NAME}")
+
+
+def get_user_avatar_path() -> Optional[str]:
+    base_dir = os.path.dirname(__file__)
+    for relative_path in AVATAR_CANDIDATE_FILES:
+        avatar_path = os.path.join(base_dir, relative_path)
+        if os.path.exists(avatar_path):
+            return avatar_path
+    return None
+
+
+def render_new_layout_header() -> None:
+    st.markdown('<div class="dashboard-topbar">', unsafe_allow_html=True)
+    st.markdown('<p class="dashboard-overview-label">Overview</p>', unsafe_allow_html=True)
+
+    col_title, col_search, col_cfg, col_alert, col_avatar = st.columns([5.4, 2.55, 0.8, 0.8, 0.9])
+
+    with col_title:
+        st.markdown('<p class="dashboard-title">Overview</p>', unsafe_allow_html=True)
+
+    with col_search:
+        st.text_input(
+            "Buscar geral",
+            key="dashboard_global_search",
+            placeholder="Search for something",
+            label_visibility="collapsed",
+        )
+
+    with col_cfg:
+        if st.button("⚙️", key="dashboard_settings_btn", help="Configurações"):
+            st.toast("Configurações em breve", icon="⚙️")
+
+    with col_alert:
+        if st.button("🔔", key="dashboard_alert_btn", help="Alertas"):
+            st.toast("Sem novos alertas", icon="🔔")
+
+    with col_avatar:
+        avatar_path = get_user_avatar_path()
+        if avatar_path:
+            st.image(avatar_path, width=50)
+        else:
+            username = str(st.session_state.get("current_user") or "U")
+            st.markdown(f"### 👤 {username[:1].upper()}")
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
 def parse_float(value: object) -> float:
     try:
         return float(value)
@@ -907,6 +1494,212 @@ def parse_int(value: object) -> int:
         return int(float(value))
     except (TypeError, ValueError):
         return 0
+
+
+def coerce_datetime(value: object) -> Optional[datetime]:
+    if value is None:
+        return None
+    if hasattr(value, "to_datetime"):
+        try:
+            return value.to_datetime()
+        except Exception:
+            return None
+    if isinstance(value, datetime):
+        return value
+    try:
+        parsed = pd.to_datetime(value, errors="coerce")
+        if pd.isna(parsed):
+            return None
+        return parsed.to_pydatetime()
+    except Exception:
+        return None
+
+
+def normalize_order_items(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame(columns=["codigo", "nome", "qtde", "preco", "total"])
+
+    normalized = pd.DataFrame()
+    normalized["codigo"] = df.get("CódProImpakto", pd.Series(dtype=str)).astype(str)
+    normalized["nome"] = df.get("Item", pd.Series(dtype=str)).fillna("").astype(str)
+    normalized["qtde"] = pd.to_numeric(df.get("Qtde", 0), errors="coerce").fillna(0).astype(int)
+    normalized["preco"] = pd.to_numeric(df.get("$ Unitário", 0.0), errors="coerce").fillna(0.0)
+    normalized["total"] = pd.to_numeric(df.get("$ Total", 0.0), errors="coerce").fillna(0.0)
+
+    grouped = (
+        normalized.groupby(["codigo", "nome", "preco"], as_index=False)
+        .agg({"qtde": "sum", "total": "sum"})
+        .sort_values(["nome", "codigo"])
+    )
+    return grouped
+
+
+def fetch_latest_approved_order_items_for_setor(setor_codigo: str, setor_desc: str) -> pd.DataFrame:
+    if firestore_enabled():
+        approved = fetch_firestore_rows_raw("pedido")
+    else:
+        approved = st.session_state.excel_data.get("Pedido", pd.DataFrame())
+
+    if approved.empty:
+        return pd.DataFrame()
+
+    setor_mask = approved.get("Setor", pd.Series(dtype=str)).astype(str).str.strip() == str(setor_codigo).strip()
+    if setor_mask.any():
+        approved = approved[setor_mask].copy()
+    else:
+        desc_mask = approved.get("SETOR2", pd.Series(dtype=str)).astype(str).str.strip().str.lower() == str(setor_desc).strip().lower()
+        approved = approved[desc_mask].copy()
+
+    if approved.empty:
+        return pd.DataFrame()
+
+    approved["__approved_dt"] = approved.get("approved_at").apply(coerce_datetime)
+    approved = approved.sort_values("__approved_dt", ascending=False, na_position="last")
+
+    first_order = approved.iloc[0].get("order_number")
+    if pd.notna(first_order):
+        return approved[approved.get("order_number") == first_order].copy()
+
+    return approved.head(1).copy()
+
+
+def fetch_previous_approved_order_for_setor(setor_codigo: str, setor_desc: str) -> pd.DataFrame:
+    return fetch_latest_approved_order_items_for_setor(setor_codigo, setor_desc)
+
+
+def cart_to_order_dataframe(cart: List[Dict]) -> pd.DataFrame:
+    if not cart:
+        return pd.DataFrame()
+
+    rows = []
+    for item in cart:
+        rows.append(
+            {
+                "CódProImpakto": item.get("codigo"),
+                "Item": item.get("nome"),
+                "Qtde": item.get("quantidade"),
+                "$ Unitário": item.get("preco_unitario"),
+                "$ Total": item.get("total"),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def build_order_comparison(current_items: pd.DataFrame, previous_items: pd.DataFrame) -> pd.DataFrame:
+    current_norm = normalize_order_items(current_items)
+    prev_norm = normalize_order_items(previous_items)
+
+    current_map = {str(row["codigo"]): row for _, row in current_norm.iterrows()}
+    prev_map = {str(row["codigo"]): row for _, row in prev_norm.iterrows()}
+
+    rows = []
+    all_codes = sorted(set(current_map.keys()).union(prev_map.keys()))
+    for code in all_codes:
+        cur = current_map.get(code)
+        prev = prev_map.get(code)
+
+        nome = ""
+        if cur is not None and str(cur.get("nome", "")).strip():
+            nome = str(cur.get("nome", ""))
+        elif prev is not None:
+            nome = str(prev.get("nome", ""))
+
+        qtde_atual = int(cur.get("qtde", 0)) if cur is not None else 0
+        qtde_anterior = int(prev.get("qtde", 0)) if prev is not None else 0
+        total_atual = float(cur.get("total", 0.0)) if cur is not None else 0.0
+        total_anterior = float(prev.get("total", 0.0)) if prev is not None else 0.0
+
+        if prev is None:
+            status = "Novo"
+        elif cur is None:
+            status = "Removido"
+        elif qtde_atual != qtde_anterior or abs(total_atual - total_anterior) > 0.01:
+            status = "Alterado"
+        else:
+            status = "Igual"
+
+        rows.append(
+            {
+                "Código": code,
+                "Produto": nome,
+                "Qtde Mês Anterior": qtde_anterior,
+                "Qtde Atual": qtde_atual,
+                "Δ Qtde": qtde_atual - qtde_anterior,
+                "Total Mês Anterior": total_anterior,
+                "Total Atual": total_atual,
+                "Δ Total": total_atual - total_anterior,
+                "Status": status,
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def load_latest_approved_order_into_cart() -> None:
+    setor = st.session_state.selected_setor
+    if not setor:
+        st.warning("Selecione um setor antes de repetir o pedido anterior.")
+        return
+
+    previous = fetch_latest_approved_order_items_for_setor(str(setor.get("codigo")), str(setor.get("descricao")))
+    if previous.empty:
+        st.info("Nenhum pedido aprovado anterior encontrado para este setor.")
+        return
+
+    normalized = normalize_order_items(previous)
+    if normalized.empty:
+        st.info("O pedido anterior não possui itens válidos para repetição.")
+        return
+
+    st.session_state.cart = [
+        {
+            "codigo": str(row["codigo"]),
+            "nome": str(row["nome"]),
+            "quantidade": int(row["qtde"]),
+            "preco_unitario": float(row["preco"]),
+            "total": float(row["total"]),
+        }
+        for _, row in normalized.iterrows()
+    ]
+
+    st.success(f"✅ Pedido anterior carregado no carrinho com {len(st.session_state.cart)} item(ns).")
+
+
+def render_pending_vs_previous_comparison(group_df: pd.DataFrame, group_id: str) -> None:
+    if group_df.empty:
+        return
+
+    setor_codigo = str(group_df.iloc[0].get("Setor") or group_df.iloc[0].get("Unidade") or "")
+    setor_desc = str(group_df.iloc[0].get("SETOR2") or "")
+
+    previous = fetch_previous_approved_order_for_setor(setor_codigo, setor_desc)
+    with st.expander("📊 Comparação com último pedido aprovado", expanded=False):
+        if previous.empty:
+            st.info("Não há pedido aprovado anterior para este setor.")
+            return
+
+        comparison = build_order_comparison(group_df, previous)
+        if comparison.empty:
+            st.info("Não foi possível gerar a comparação para este pedido.")
+            return
+
+        previous_date = coerce_datetime(previous.iloc[0].get("approved_at"))
+        previous_order_number = previous.iloc[0].get("order_number")
+        if previous_date:
+            st.caption(
+                f"Referência: pedido #{previous_order_number} aprovado em {previous_date.strftime('%d/%m/%Y %H:%M')}"
+            )
+
+        total_prev = float(comparison["Total Mês Anterior"].sum())
+        total_current = float(comparison["Total Atual"].sum())
+        delta_total = total_current - total_prev
+
+        col_a, col_b, col_c = st.columns(3)
+        col_a.metric("Total pedido anterior", format_currency(total_prev))
+        col_b.metric("Total atual", format_currency(total_current))
+        col_c.metric("Diferença", format_currency(delta_total))
+
+        st.dataframe(comparison, use_container_width=True, hide_index=True)
 
 
 def render_setor_selector(setor_df: pd.DataFrame) -> None:
@@ -1062,20 +1855,26 @@ def add_item_to_cart(product: dict, quantity: int) -> None:
         )
 
 
-def render_cart() -> None:
+def render_cart(compact: bool = True) -> None:
     cart = st.session_state.cart
     if not cart:
         st.info("Nenhum item no carrinho ainda.")
         return
 
-    st.subheader("4. Itens do pedido")
+    # Cabeçalho pequeno estilo dashboard
+    if not compact:
+        st.markdown('<div class="bd-section-title">Itens do pedido</div>', unsafe_allow_html=True)
+    else:
+        st.markdown('<div class="bd-table-head">Itens do pedido</div>', unsafe_allow_html=True)
+        st.markdown('<div class="bd-divider"></div>', unsafe_allow_html=True)
+
     header_cols = st.columns([1.2, 3.5, 1, 1, 1, 0.8])
-    header_cols[0].markdown("**Código**")
-    header_cols[1].markdown("**Produto**")
-    header_cols[2].markdown("**Qtd**")
-    header_cols[3].markdown("**$ Unit.**")
-    header_cols[4].markdown("**$ Total**")
-    header_cols[5].markdown("**Remover**")
+    header_cols[0].markdown('<span class="bd-table-head">Código</span>', unsafe_allow_html=True)
+    header_cols[1].markdown('<span class="bd-table-head">Produto</span>', unsafe_allow_html=True)
+    header_cols[2].markdown('<span class="bd-table-head">Qtd</span>', unsafe_allow_html=True)
+    header_cols[3].markdown('<span class="bd-table-head">Unit.</span>', unsafe_allow_html=True)
+    header_cols[4].markdown('<span class="bd-table-head">Total</span>', unsafe_allow_html=True)
+    header_cols[5].markdown('<span class="bd-table-head">Rem.</span>', unsafe_allow_html=True)
 
     for idx, item in enumerate(cart):
         col_codigo, col_nome, col_qtd, col_preco, col_total, col_remove = st.columns(
@@ -1083,6 +1882,7 @@ def render_cart() -> None:
         )
         col_codigo.write(item["codigo"])
         col_nome.write(item["nome"])
+
         nova_qtd = col_qtd.number_input(
             "Quantidade",
             min_value=1,
@@ -1103,7 +1903,12 @@ def render_cart() -> None:
             st.rerun()
 
     total = sum(entry["total"] for entry in cart)
-    st.metric("Total do pedido", format_currency(total))
+
+    # Rodapé tipo dashboard (sem metric gigante)
+    st.markdown('<div class="bd-divider"></div>', unsafe_allow_html=True)
+    c1, c2 = st.columns([3, 1])
+    c1.markdown('<span class="bd-table-head">Total</span>', unsafe_allow_html=True)
+    c2.markdown(f"**{format_currency(total)}**")
 
 
 def build_cart_rows(destino: str) -> pd.DataFrame:
@@ -1237,6 +2042,122 @@ def generate_previa_pdf() -> Optional[io.BytesIO]:
     )
     elements.append(table)
     elements.append(Spacer(1, 10))
+
+    # Comparison with last approved order for the same setor
+    previous_order = fetch_previous_approved_order_for_setor(
+        str(setor.get("codigo")),
+        str(setor.get("descricao")),
+    )
+    current_df = cart_to_order_dataframe(cart)
+    comparison_df = build_order_comparison(current_df, previous_order)
+
+    if not previous_order.empty and not comparison_df.empty:
+        previous_date = coerce_datetime(previous_order.iloc[0].get("approved_at"))
+        previous_order_number = previous_order.iloc[0].get("order_number")
+        previous_label = f"Pedido #{previous_order_number}"
+        if previous_date:
+            previous_label += f" ({previous_date.strftime('%d/%m/%Y %H:%M')})"
+
+        subtitle_style = ParagraphStyle(
+            "Subtitulo",
+            parent=styles["Heading3"],
+            fontSize=11,
+            alignment=TA_LEFT,
+            textColor=colors.HexColor("#1f2937"),
+        )
+        elements.append(Paragraph("<b>Comparacao com ultimo pedido aprovado</b>", subtitle_style))
+        elements.append(Spacer(1, 6))
+        elements.append(Paragraph(f"Referencia: {previous_label}", styles["Normal"]))
+        elements.append(Spacer(1, 6))
+
+        total_prev = float(comparison_df["Total Mês Anterior"].sum())
+        total_current = float(comparison_df["Total Atual"].sum())
+        delta_total = total_current - total_prev
+        summary_table = Table(
+            [
+                ["Total anterior", format_currency(total_prev)],
+                ["Total atual", format_currency(total_current)],
+                ["Diferenca", format_currency(delta_total)],
+            ],
+            colWidths=[4.5 * 28.35, 4.0 * 28.35],
+        )
+        summary_table.setStyle(
+            TableStyle(
+                [
+                    ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
+                    ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+                    ("ALIGN", (0, 0), (0, -1), "LEFT"),
+                    ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+                    ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+                    ("ROWBACKGROUNDS", (0, 0), (-1, -1), [colors.HexColor("#F8FAFC"), colors.white]),
+                ]
+            )
+        )
+        elements.append(summary_table)
+        elements.append(Spacer(1, 8))
+
+        comparison_rows = [[
+            "Codigo",
+            "Produto",
+            "Qtde Ant.",
+            "Qtde Atual",
+            "Valor Ant.",
+            "Valor Atual",
+            "Dif. Valor",
+            "Status",
+        ]]
+        for _, row in comparison_df.iterrows():
+            comparison_rows.append(
+                [
+                    str(row.get("Código", "")),
+                    str(row.get("Produto", ""))[:34],
+                    str(int(row.get("Qtde Mês Anterior", 0))),
+                    str(int(row.get("Qtde Atual", 0))),
+                    format_currency(float(row.get("Total Mês Anterior", 0.0))),
+                    format_currency(float(row.get("Total Atual", 0.0))),
+                    format_currency(float(row.get("Δ Total", 0.0))),
+                    str(row.get("Status", "")),
+                ]
+            )
+
+        comparison_rows.append(
+            [
+                "",
+                "TOTAL GERAL",
+                "",
+                "",
+                format_currency(total_prev),
+                format_currency(total_current),
+                format_currency(delta_total),
+                "",
+            ]
+        )
+
+        comparison_table = Table(
+            comparison_rows,
+            colWidths=[1.6 * 28.35, 3.9 * 28.35, 1.4 * 28.35, 1.4 * 28.35, 1.9 * 28.35, 1.9 * 28.35, 1.9 * 28.35, 1.6 * 28.35],
+        )
+        comparison_table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1E3A8A")),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("ALIGN", (0, 0), (-1, 0), "CENTER"),
+                    ("ALIGN", (0, 1), (0, -2), "CENTER"),
+                    ("ALIGN", (1, 1), (1, -1), "LEFT"),
+                    ("ALIGN", (2, 1), (3, -1), "CENTER"),
+                    ("ALIGN", (4, 1), (6, -1), "RIGHT"),
+                    ("ALIGN", (7, 1), (7, -1), "CENTER"),
+                    ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+                    ("ROWBACKGROUNDS", (0, 1), (-1, -2), [colors.white, colors.HexColor("#F8FAFC")]),
+                    ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#E2E8F0")),
+                    ("FONTNAME", (1, -1), (6, -1), "Helvetica-Bold"),
+                ]
+            )
+        )
+        elements.append(comparison_table)
+        elements.append(Spacer(1, 10))
 
     note_style = ParagraphStyle(
         "Nota",
@@ -2201,6 +3122,7 @@ def render_aguardando_tab() -> None:
             
             items_display.columns = ["📦 Código", "📝 Produto", "🔢 Qtde", "💵 Unit.", "💰 Total", "📐 Un."]
             st.dataframe(items_display, use_container_width=True, hide_index=True)
+            render_pending_vs_previous_comparison(group_df, group_id)
             
             # Edit section
             is_expanded = st.session_state.get("edit_client") == group_id
@@ -2500,40 +3422,72 @@ def render_new_order_tab() -> None:
     if data is None:
         st.info("Carregue uma planilha para começar.")
         return
-    
-    # Só sincroniza com Firestore se há dados lá (evita sobrescrever com DataFrames vazios)
+
     if firestore_enabled():
         produtos_firestore = fetch_products_df()
         setores_firestore = fetch_setores_df()
         if not produtos_firestore.empty and not setores_firestore.empty:
             data["Produtos"] = produtos_firestore
             data["Setor"] = setores_firestore
-    
-    # Filter setores based on user role
+
     current_user = st.session_state.get("current_user")
     user_info = get_user_info(current_user)
     setores_df = filter_setores_for_user(data.get("Setor", pd.DataFrame()), user_info)
 
-    st.subheader("Novo pedido")
+    st.markdown('<div class="bd-page-title">Novo Pedido</div>', unsafe_allow_html=True)
+
+    # Card: Cliente
+    st.markdown('<div class="bd-card">', unsafe_allow_html=True)
+    st.markdown('<div class="bd-card-title"><h3>Selecionar Cliente</h3></div>', unsafe_allow_html=True)
     render_setor_selector(setores_df)
-    produto = render_product_selector(data.get("Produtos", pd.DataFrame()))
+    st.markdown('</div>', unsafe_allow_html=True)
 
-    col_qtd, col_add = st.columns([1, 1])
-    quantidade = col_qtd.number_input(
-        "Quantidade",
-        min_value=1,
-        max_value=9999,
-        value=1,
-        step=1,
-    )
-    can_add = produto is not None and st.session_state.selected_setor is not None
-    if col_add.button("Adicionar ao carrinho", disabled=not can_add):
-        add_item_to_cart(produto, int(quantidade))
-        st.success("Produto adicionado ao carrinho.")
+    st.write("")  # spacing
 
-    render_cart()
-    render_previa_download()
-    render_save_buttons()
+    # Grid 2 colunas: Produto + Resumo
+    col_left, col_right = st.columns([1.6, 1])
+
+    with col_left:
+        st.markdown('<div class="bd-card">', unsafe_allow_html=True)
+        st.markdown('<div class="bd-card-title"><h3>Produto</h3></div>', unsafe_allow_html=True)
+
+        produto = render_product_selector(data.get("Produtos", pd.DataFrame()))
+
+        col_qtd, col_add = st.columns([1, 1])
+        quantidade = col_qtd.number_input(
+            "Quantidade",
+            min_value=1,
+            max_value=9999,
+            value=1,
+            step=1,
+            label_visibility="collapsed",
+        )
+        can_add = produto is not None and st.session_state.selected_setor is not None
+
+        with col_add:
+            st.markdown('<div class="bd-primary">', unsafe_allow_html=True)
+            if st.button("Adicionar ao carrinho", disabled=not can_add, use_container_width=True):
+                add_item_to_cart(produto, int(quantidade))
+                st.success("Produto adicionado ao carrinho.")
+            st.markdown('</div>', unsafe_allow_html=True)
+
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        st.write("")
+        st.markdown('<div class="bd-card">', unsafe_allow_html=True)
+        st.markdown('<div class="bd-card-title"><h3>Itens do pedido</h3></div>', unsafe_allow_html=True)
+        render_cart(compact=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with col_right:
+        st.markdown('<div class="bd-card">', unsafe_allow_html=True)
+        st.markdown('<div class="bd-card-title"><h3>Ações</h3></div>', unsafe_allow_html=True)
+        if st.button("🔁 Repetir pedido anterior", use_container_width=True):
+            load_latest_approved_order_into_cart()
+            st.rerun()
+        render_previa_download()
+        render_save_buttons()
+        st.markdown('</div>', unsafe_allow_html=True)
 
 
 def render_approved_orders_tab() -> None:
@@ -2949,6 +3903,201 @@ def render_history_tab() -> None:
         st.error(f"❌ Erro ao carregar histórico: {e}")
 
 
+def render_product_update_tab() -> None:
+    st.subheader("📦 Atualização de Produtos")
+
+    if st.session_state.get("current_user") != "admin":
+        st.warning("⚠️ Apenas admins podem atualizar produtos.")
+        return
+
+    current_products = st.session_state.excel_data.get("Produtos", pd.DataFrame())
+    current_products = normalize_products_df(current_products)
+
+    st.caption("Envie uma planilha para comparar preços com a base atual antes de atualizar.")
+    upload = st.file_uploader(
+        "Planilha para atualização de produtos (.xlsx)",
+        type=["xlsx", "xls"],
+        key="product_update_upload",
+    )
+
+    source_label = st.session_state.get("product_update_source", "manual")
+    if upload is not None:
+        try:
+            upload_data = load_excel_data(upload.getvalue())
+            incoming_products = normalize_products_df(upload_data.get("Produtos", pd.DataFrame()))
+            if incoming_products.empty:
+                st.error("A planilha enviada não possui dados válidos na aba 'Produtos'.")
+            else:
+                changes = compute_product_changes(current_products, incoming_products)
+                st.session_state.product_update_changes = changes
+                st.session_state.product_update_df = incoming_products
+                source_label = f"upload ({upload.name})"
+                st.session_state.product_update_source = source_label
+
+                col_a, col_b, col_c = st.columns(3)
+                col_a.metric("Produtos atuais", len(current_products))
+                col_b.metric("Produtos na planilha", len(incoming_products))
+                col_c.metric("Alterações detectadas", len(changes))
+
+                if changes.empty:
+                    st.info("Nenhuma alteração de produto/preço foi detectada.")
+                else:
+                    preview = changes.copy()
+                    preview["Preço Anterior"] = preview["old_price"].apply(format_currency)
+                    preview["Preço Novo"] = preview["new_price"].apply(format_currency)
+                    preview["Diferença"] = preview["diff_price"].apply(format_currency)
+                    preview = preview.rename(
+                        columns={
+                            "productCode": "Código",
+                            "name": "Produto",
+                            "change_type": "Tipo",
+                        }
+                    )
+                    st.markdown("**Pré-visualização das alterações**")
+                    st.dataframe(
+                        preview[["Código", "Produto", "Tipo", "Preço Anterior", "Preço Novo", "Diferença"]],
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+        except Exception as exc:
+            st.error(f"❌ Erro ao analisar planilha: {exc}")
+
+    can_apply = not st.session_state.get("product_update_df", pd.DataFrame()).empty
+    if st.button("✅ Aplicar atualização de produtos", use_container_width=True, disabled=not can_apply):
+        incoming_products = st.session_state.get("product_update_df", pd.DataFrame())
+        changes = st.session_state.get("product_update_changes", pd.DataFrame())
+        if incoming_products.empty:
+            st.error("Nenhuma planilha preparada para atualização.")
+        else:
+            source_label = st.session_state.get("product_update_source", "manual")
+            if firestore_enabled():
+                upsert_collection_from_df(FIRESTORE_PRODUCTS_COLLECTION, incoming_products, "productCode")
+                fetch_products_df.clear()
+                sync_firestore_reference_data()
+            else:
+                st.session_state.excel_data["Produtos"] = incoming_products
+
+            save_product_history(changes, source_label)
+            log_audit(
+                "products_updated",
+                {
+                    "source": source_label,
+                    "items_changed": int(len(changes)),
+                    "total_products": int(len(incoming_products)),
+                },
+            )
+            st.success(f"✅ Produtos atualizados com sucesso. Alterações registradas: {len(changes)}")
+            st.session_state.product_update_changes = pd.DataFrame()
+            st.session_state.product_update_df = pd.DataFrame()
+            st.session_state.product_update_source = "manual"
+            st.rerun()
+
+    st.divider()
+    st.markdown("**Histórico de alterações de produto**")
+    history_df = fetch_product_history(limit=500)
+    if history_df.empty:
+        st.info("Nenhum histórico de alteração de produto encontrado.")
+        return
+
+    display_df = history_df.copy()
+    display_df["Preço Anterior"] = pd.to_numeric(display_df.get("old_price", 0.0), errors="coerce").fillna(0.0).apply(format_currency)
+    display_df["Preço Novo"] = pd.to_numeric(display_df.get("new_price", 0.0), errors="coerce").fillna(0.0).apply(format_currency)
+    display_df["Diferença"] = pd.to_numeric(display_df.get("diff_price", 0.0), errors="coerce").fillna(0.0).apply(format_currency)
+    if "changed_at" in display_df.columns:
+        display_df["Data"] = display_df["changed_at"].apply(
+            lambda value: coerce_datetime(value).strftime("%d/%m/%Y %H:%M") if coerce_datetime(value) else str(value)
+        )
+    else:
+        display_df["Data"] = "-"
+
+    display_df = display_df.rename(
+        columns={
+            "productCode": "Código",
+            "name": "Produto",
+            "change_type": "Tipo",
+            "changed_by": "Alterado por",
+            "source": "Origem",
+        }
+    )
+    st.dataframe(
+        display_df[["Data", "Código", "Produto", "Tipo", "Preço Anterior", "Preço Novo", "Diferença", "Alterado por", "Origem"]],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.divider()
+    st.markdown("**Relatório de aumento de preços**")
+
+    report_df = history_df.copy()
+    report_df["diff_price_num"] = pd.to_numeric(report_df.get("diff_price", 0.0), errors="coerce").fillna(0.0)
+    report_df = report_df[
+        (report_df.get("change_type", "") == "Preço Alterado")
+        & (report_df["diff_price_num"] > 0)
+    ].copy()
+
+    if report_df.empty:
+        st.info("Nenhum aumento de preço registrado até o momento.")
+        return
+
+    report_df["changed_at_dt"] = report_df.get("changed_at").apply(coerce_datetime)
+    report_df = report_df[report_df["changed_at_dt"].notna()].copy()
+
+    if report_df.empty:
+        st.info("Não foi possível converter datas do histórico para montar o relatório.")
+        return
+
+    min_date = report_df["changed_at_dt"].min().date()
+    max_date = report_df["changed_at_dt"].max().date()
+
+    c1, c2 = st.columns(2)
+    with c1:
+        start_date = st.date_input("Data inicial", value=min_date, min_value=min_date, max_value=max_date, key="price_report_start")
+    with c2:
+        end_date = st.date_input("Data final", value=max_date, min_value=min_date, max_value=max_date, key="price_report_end")
+
+    if start_date > end_date:
+        st.warning("A data inicial não pode ser maior que a data final.")
+        return
+
+    filtered = report_df[
+        (report_df["changed_at_dt"].dt.date >= start_date)
+        & (report_df["changed_at_dt"].dt.date <= end_date)
+    ].copy()
+
+    if filtered.empty:
+        st.info("Não há aumentos de preço no período selecionado.")
+        return
+
+    filtered["Data"] = filtered["changed_at_dt"].dt.strftime("%d/%m/%Y %H:%M")
+    filtered["Preço Anterior"] = pd.to_numeric(filtered.get("old_price", 0.0), errors="coerce").fillna(0.0).apply(format_currency)
+    filtered["Preço Novo"] = pd.to_numeric(filtered.get("new_price", 0.0), errors="coerce").fillna(0.0).apply(format_currency)
+    filtered["Aumento"] = filtered["diff_price_num"].apply(format_currency)
+
+    total_increases = float(filtered["diff_price_num"].sum())
+    products_changed = int(filtered["productCode"].nunique()) if "productCode" in filtered.columns else 0
+    events_count = int(len(filtered))
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Eventos de aumento", events_count)
+    m2.metric("Produtos afetados", products_changed)
+    m3.metric("Soma dos aumentos", format_currency(total_increases))
+
+    filtered = filtered.rename(
+        columns={
+            "productCode": "Código",
+            "name": "Produto",
+            "changed_by": "Alterado por",
+            "source": "Origem",
+        }
+    )
+
+    st.dataframe(
+        filtered[["Data", "Código", "Produto", "Preço Anterior", "Preço Novo", "Aumento", "Alterado por", "Origem"]],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
 def render_user_management_tab() -> None:
     """Admin interface for user management."""
     st.subheader("👥 Gerenciamento de Usuários")
@@ -3211,52 +4360,123 @@ def main() -> None:
         render_supervisora_mobile_view(user_info)
         st.stop()
     
-    # Web interface for user and admin
-    st.title("Sistema de Gestão de Pedidos - Versão Web")
-    st.caption("Interface Streamlit preparada para deploy em serviços como Railway ou Render.")
-    
     # Display current user in sidebar
     with st.sidebar:
+        render_company_branding()
+        st.divider()
         st.write(f"👤 Usuário: **{st.session_state.current_user}**")
+        st.session_state.layout_mode_new = st.toggle(
+            "Layout novo",
+            value=bool(st.session_state.get("layout_mode_new", False)),
+            help="Ativa o visual novo sem alterar dados do sistema.",
+        )
+
+        if st.session_state.get("layout_mode_new"):
+            is_admin = st.session_state.get("current_user") == "admin"
+            nav_items = [
+                ("novo", "🛒 Novo Pedido"),
+                ("aguardando", "⏳ Aguardando Aprovação"),
+                ("aprovados", "📋 Pedidos Aprovados"),
+                ("historico", "📚 Histórico de Pedidos"),
+            ]
+            if is_admin:
+                nav_items.append(("produtos", "📦 Atualizar Produtos"))
+                nav_items.append(("usuarios", "👥 Gerenciar Usuários"))
+
+            if "layout_nav_page" not in st.session_state:
+                st.session_state.layout_nav_page = "novo"
+
+            valid_pages = {item[0] for item in nav_items}
+            if st.session_state.layout_nav_page not in valid_pages:
+                st.session_state.layout_nav_page = "novo"
+
+            st.markdown("### 🧭 Navegação")
+            for page_key, page_label in nav_items:
+                btn_type = "primary" if st.session_state.layout_nav_page == page_key else "secondary"
+                if st.button(
+                    page_label,
+                    key=f"sidebar_nav_{page_key}",
+                    use_container_width=True,
+                    type=btn_type,
+                ):
+                    st.session_state.layout_nav_page = page_key
+                    st.rerun()
+
         if st.button("Sair"):
             st.session_state.authenticated = False
             st.session_state.current_user = None
             st.rerun()
+
+    # Web interface header (after toggle state is resolved)
+    if not st.session_state.get("layout_mode_new", False):
+        st.title("Sistema de Gestão de Pedidos - Versão Web")
+        st.caption("Interface Streamlit preparada para deploy em serviços como Railway ou Render.")
+
+    apply_layout_theme(bool(st.session_state.get("layout_mode_new", False)))
+
+    if st.session_state.get("layout_mode_new"):
+        render_new_layout_header()
+    else:
+        st.caption("🧭 Modo de visualização ativo: Layout antigo")
 
     render_sidebar()
 
     if st.session_state.excel_data is None:
         st.stop()
 
-    # Create tabs based on user role
-    if st.session_state.get("current_user") == "admin":
-        tab_novo, tab_aguardando, tab_aprovados, tab_historico, tab_usuarios = st.tabs([
-            "Novo Pedido", 
-            "Aguardando Aprovação", 
-            "📋 Pedidos Aprovados",
-            "📚 Histórico de Pedidos",
-            "👥 Gerenciar Usuários"
-        ])
-    else:
-        tab_novo, tab_aguardando, tab_aprovados, tab_historico = st.tabs([
-            "Novo Pedido", 
-            "Aguardando Aprovação", 
-            "📋 Pedidos Aprovados",
-            "📚 Histórico de Pedidos"
-        ])
-    
-    with tab_novo:
-        render_new_order_tab()
-    with tab_aguardando:
-        render_aguardando_tab()
-    with tab_aprovados:
-        render_approved_orders_tab()
-    with tab_historico:
-        render_history_tab()
-    
-    if st.session_state.get("current_user") == "admin":
-        with tab_usuarios:
+    st.markdown('<div class="main-container">', unsafe_allow_html=True)
+
+    if st.session_state.get("layout_mode_new"):
+        current_page = st.session_state.get("layout_nav_page", "novo")
+        if current_page == "novo":
+            render_new_order_tab()
+        elif current_page == "aguardando":
+            render_aguardando_tab()
+        elif current_page == "aprovados":
+            render_approved_orders_tab()
+        elif current_page == "historico":
+            render_history_tab()
+        elif current_page == "produtos" and st.session_state.get("current_user") == "admin":
+            render_product_update_tab()
+        elif current_page == "usuarios" and st.session_state.get("current_user") == "admin":
             render_user_management_tab()
+        else:
+            render_new_order_tab()
+    else:
+        # Create tabs based on user role (layout antigo)
+        if st.session_state.get("current_user") == "admin":
+            tab_novo, tab_aguardando, tab_aprovados, tab_historico, tab_produtos, tab_usuarios = st.tabs([
+                "Novo Pedido", 
+                "Aguardando Aprovação", 
+                "📋 Pedidos Aprovados",
+                "📚 Histórico de Pedidos",
+                "📦 Atualizar Produtos",
+                "👥 Gerenciar Usuários"
+            ])
+        else:
+            tab_novo, tab_aguardando, tab_aprovados, tab_historico = st.tabs([
+                "Novo Pedido", 
+                "Aguardando Aprovação", 
+                "📋 Pedidos Aprovados",
+                "📚 Histórico de Pedidos"
+            ])
+        
+        with tab_novo:
+            render_new_order_tab()
+        with tab_aguardando:
+            render_aguardando_tab()
+        with tab_aprovados:
+            render_approved_orders_tab()
+        with tab_historico:
+            render_history_tab()
+        
+        if st.session_state.get("current_user") == "admin":
+            with tab_produtos:
+                render_product_update_tab()
+            with tab_usuarios:
+                render_user_management_tab()
+
+    st.markdown('</div>', unsafe_allow_html=True)
 
     render_download_section()
 
