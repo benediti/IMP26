@@ -1543,13 +1543,9 @@ def fetch_latest_approved_order_items_for_setor(setor_codigo: str, setor_desc: s
     if approved.empty:
         return pd.DataFrame()
 
-    # Prefer matching by client description to avoid coupling history lookup to client IDs.
+    # Match by client description only to avoid coupling historical comparison to client IDs.
     desc_mask = approved.get("SETOR2", pd.Series(dtype=str)).astype(str).str.strip().str.lower() == str(setor_desc).strip().lower()
-    if desc_mask.any():
-        approved = approved[desc_mask].copy()
-    else:
-        setor_mask = approved.get("Setor", pd.Series(dtype=str)).astype(str).str.strip() == str(setor_codigo).strip()
-        approved = approved[setor_mask].copy()
+    approved = approved[desc_mask].copy()
 
     if approved.empty:
         return pd.DataFrame()
@@ -2049,120 +2045,150 @@ def generate_previa_pdf() -> Optional[io.BytesIO]:
     elements.append(Spacer(1, 10))
 
     # Comparison with last approved order for the same setor
-    previous_order = fetch_previous_approved_order_for_setor(
-        str(setor.get("codigo")),
-        str(setor.get("descricao")),
-    )
-    current_df = cart_to_order_dataframe(cart)
-    comparison_df = build_order_comparison(current_df, previous_order)
-
-    if not previous_order.empty and not comparison_df.empty:
-        previous_date = coerce_datetime(previous_order.iloc[0].get("approved_at"))
-        previous_order_number = previous_order.iloc[0].get("order_number")
-        previous_label = f"Pedido #{previous_order_number}"
-        if previous_date:
-            previous_label += f" ({previous_date.strftime('%d/%m/%Y %H:%M')})"
-
-        subtitle_style = ParagraphStyle(
-            "Subtitulo",
-            parent=styles["Heading3"],
-            fontSize=11,
-            alignment=TA_LEFT,
-            textColor=colors.HexColor("#1f2937"),
+    try:
+        previous_order = fetch_previous_approved_order_for_setor(
+            str(setor.get("codigo")),
+            str(setor.get("descricao")),
         )
-        elements.append(Paragraph("<b>Comparacao com ultimo pedido aprovado</b>", subtitle_style))
-        elements.append(Spacer(1, 6))
-        elements.append(Paragraph(f"Referencia: {previous_label}", styles["Normal"]))
-        elements.append(Spacer(1, 6))
+        current_df = cart_to_order_dataframe(cart)
+        comparison_df = build_order_comparison(current_df, previous_order)
 
-        total_prev = float(comparison_df["Total Mês Anterior"].sum())
-        total_current = float(comparison_df["Total Atual"].sum())
-        delta_total = total_current - total_prev
-        summary_table = Table(
-            [
-                ["Total anterior", format_currency(total_prev)],
-                ["Total atual", format_currency(total_current)],
-                ["Diferenca", format_currency(delta_total)],
-            ],
-            colWidths=[4.5 * 28.35, 4.0 * 28.35],
-        )
-        summary_table.setStyle(
-            TableStyle(
-                [
-                    ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
-                    ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
-                    ("ALIGN", (0, 0), (0, -1), "LEFT"),
-                    ("ALIGN", (1, 0), (1, -1), "RIGHT"),
-                    ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
-                    ("ROWBACKGROUNDS", (0, 0), (-1, -1), [colors.HexColor("#F8FAFC"), colors.white]),
-                ]
+        if not previous_order.empty and not comparison_df.empty:
+            previous_date = coerce_datetime(previous_order.iloc[0].get("approved_at"))
+            previous_order_number = previous_order.iloc[0].get("order_number")
+            previous_label = f"Pedido #{previous_order_number}"
+            if previous_date:
+                previous_label += f" ({previous_date.strftime('%d/%m/%Y %H:%M')})"
+
+            subtitle_style = ParagraphStyle(
+                "Subtitulo",
+                parent=styles["Heading3"],
+                fontSize=11,
+                alignment=TA_LEFT,
+                textColor=colors.HexColor("#1f2937"),
             )
-        )
-        elements.append(summary_table)
-        elements.append(Spacer(1, 8))
+            elements.append(Paragraph("<b>Comparacao com ultimo pedido aprovado</b>", subtitle_style))
+            elements.append(Spacer(1, 6))
+            elements.append(Paragraph(f"Referencia: {previous_label}", styles["Normal"]))
+            elements.append(Spacer(1, 6))
 
-        comparison_rows = [[
-            "Codigo",
-            "Produto",
-            "Qtde Ant.",
-            "Qtde Atual",
-            "Valor Ant.",
-            "Valor Atual",
-            "Dif. Valor",
-            "Status",
-        ]]
-        for _, row in comparison_df.iterrows():
+            total_prev = float(comparison_df["Total Mês Anterior"].sum())
+            total_current = float(comparison_df["Total Atual"].sum())
+            delta_total = total_current - total_prev
+            summary_table = Table(
+                [
+                    ["Total anterior", format_currency(total_prev)],
+                    ["Total atual", format_currency(total_current)],
+                    ["Diferenca", format_currency(delta_total)],
+                ],
+                colWidths=[4.5 * 28.35, 4.0 * 28.35],
+            )
+            summary_table.setStyle(
+                TableStyle(
+                    [
+                        ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
+                        ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+                        ("ALIGN", (0, 0), (0, -1), "LEFT"),
+                        ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+                        ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+                        ("ROWBACKGROUNDS", (0, 0), (-1, -1), [colors.HexColor("#F8FAFC"), colors.white]),
+                    ]
+                )
+            )
+            elements.append(summary_table)
+            elements.append(Spacer(1, 8))
+
+            comparison_rows = [[
+                "Codigo",
+                "Produto",
+                "Qtde Ant.",
+                "Qtde Atual",
+                "Valor Ant.",
+                "Valor Atual",
+                "Dif. Valor",
+                "Status",
+            ]]
+            for _, row in comparison_df.iterrows():
+                qtde_ant_val = pd.to_numeric(row.get("Qtde Mês Anterior", 0), errors="coerce")
+                qtde_atual_val = pd.to_numeric(row.get("Qtde Atual", 0), errors="coerce")
+                total_ant_val = pd.to_numeric(row.get("Total Mês Anterior", 0.0), errors="coerce")
+                total_atual_val = pd.to_numeric(row.get("Total Atual", 0.0), errors="coerce")
+                delta_val = pd.to_numeric(row.get("Δ Total", 0.0), errors="coerce")
+
+                qtde_ant = int(0 if pd.isna(qtde_ant_val) else qtde_ant_val)
+                qtde_atual = int(0 if pd.isna(qtde_atual_val) else qtde_atual_val)
+                total_ant = float(0.0 if pd.isna(total_ant_val) else total_ant_val)
+                total_atual_row = float(0.0 if pd.isna(total_atual_val) else total_atual_val)
+                delta_row = float(0.0 if pd.isna(delta_val) else delta_val)
+
+                comparison_rows.append(
+                    [
+                        str(row.get("Código", "")),
+                        str(row.get("Produto", ""))[:34],
+                        str(qtde_ant),
+                        str(qtde_atual),
+                        format_currency(total_ant),
+                        format_currency(total_atual_row),
+                        format_currency(delta_row),
+                        str(row.get("Status", "")),
+                    ]
+                )
+
             comparison_rows.append(
                 [
-                    str(row.get("Código", "")),
-                    str(row.get("Produto", ""))[:34],
-                    str(int(row.get("Qtde Mês Anterior", 0))),
-                    str(int(row.get("Qtde Atual", 0))),
-                    format_currency(float(row.get("Total Mês Anterior", 0.0))),
-                    format_currency(float(row.get("Total Atual", 0.0))),
-                    format_currency(float(row.get("Δ Total", 0.0))),
-                    str(row.get("Status", "")),
+                    "",
+                    "TOTAL GERAL",
+                    "",
+                    "",
+                    format_currency(total_prev),
+                    format_currency(total_current),
+                    format_currency(delta_total),
+                    "",
                 ]
             )
 
-        comparison_rows.append(
-            [
-                "",
-                "TOTAL GERAL",
-                "",
-                "",
-                format_currency(total_prev),
-                format_currency(total_current),
-                format_currency(delta_total),
-                "",
-            ]
-        )
-
-        comparison_table = Table(
-            comparison_rows,
-            colWidths=[1.6 * 28.35, 3.9 * 28.35, 1.4 * 28.35, 1.4 * 28.35, 1.9 * 28.35, 1.9 * 28.35, 1.9 * 28.35, 1.6 * 28.35],
-        )
-        comparison_table.setStyle(
-            TableStyle(
-                [
-                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1E3A8A")),
-                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                    ("ALIGN", (0, 0), (-1, 0), "CENTER"),
-                    ("ALIGN", (0, 1), (0, -2), "CENTER"),
-                    ("ALIGN", (1, 1), (1, -1), "LEFT"),
-                    ("ALIGN", (2, 1), (3, -1), "CENTER"),
-                    ("ALIGN", (4, 1), (6, -1), "RIGHT"),
-                    ("ALIGN", (7, 1), (7, -1), "CENTER"),
-                    ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
-                    ("ROWBACKGROUNDS", (0, 1), (-1, -2), [colors.white, colors.HexColor("#F8FAFC")]),
-                    ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#E2E8F0")),
-                    ("FONTNAME", (1, -1), (6, -1), "Helvetica-Bold"),
-                ]
+            comparison_table = Table(
+                comparison_rows,
+                colWidths=[1.6 * 28.35, 3.9 * 28.35, 1.4 * 28.35, 1.4 * 28.35, 1.9 * 28.35, 1.9 * 28.35, 1.9 * 28.35, 1.6 * 28.35],
+            )
+            comparison_table.setStyle(
+                TableStyle(
+                    [
+                        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1E3A8A")),
+                        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                        ("ALIGN", (0, 0), (-1, 0), "CENTER"),
+                        ("ALIGN", (0, 1), (0, -2), "CENTER"),
+                        ("ALIGN", (1, 1), (1, -1), "LEFT"),
+                        ("ALIGN", (2, 1), (3, -1), "CENTER"),
+                        ("ALIGN", (4, 1), (6, -1), "RIGHT"),
+                        ("ALIGN", (7, 1), (7, -1), "CENTER"),
+                        ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+                        ("ROWBACKGROUNDS", (0, 1), (-1, -2), [colors.white, colors.HexColor("#F8FAFC")]),
+                        ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#E2E8F0")),
+                        ("FONTNAME", (1, -1), (6, -1), "Helvetica-Bold"),
+                    ]
+                )
+            )
+            elements.append(comparison_table)
+            elements.append(Spacer(1, 10))
+        else:
+            elements.append(
+                Paragraph(
+                    "<i>Comparativo indisponivel para este cliente (sem pedido aprovado anterior compativel).</i>",
+                    styles["Normal"],
+                )
+            )
+            elements.append(Spacer(1, 8))
+    except Exception as comparison_error:
+        st.warning(f"⚠️ Comparativo não pôde ser incluído no PDF: {comparison_error}")
+        elements.append(
+            Paragraph(
+                "<i>Comparativo indisponivel no momento devido a inconsistencias de dados.</i>",
+                styles["Normal"],
             )
         )
-        elements.append(comparison_table)
-        elements.append(Spacer(1, 10))
+        elements.append(Spacer(1, 8))
 
     note_style = ParagraphStyle(
         "Nota",
