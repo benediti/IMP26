@@ -173,6 +173,12 @@ def render_login() -> bool:
             font-weight: 700;
         }
 
+        .login-logo {
+            display: flex;
+            justify-content: center;
+            margin-bottom: 0.65rem;
+        }
+
         .login-subtitle {
             margin: 0.3rem 0 0.9rem 0;
             color: rgba(255, 255, 255, 0.92);
@@ -196,6 +202,13 @@ def render_login() -> bool:
         """,
         unsafe_allow_html=True,
     )
+
+    logo_path = get_company_logo_path()
+    if logo_path:
+        st.markdown('<div class="login-logo">', unsafe_allow_html=True)
+        st.image(logo_path, width=220)
+        st.markdown('</div>', unsafe_allow_html=True)
+
     st.markdown('<p class="login-title">🔐 Login</p>', unsafe_allow_html=True)
     st.markdown('<p class="login-subtitle">Sistema de Gestão de Pedidos</p>', unsafe_allow_html=True)
     st.markdown('<div class="login-card">', unsafe_allow_html=True)
@@ -1588,6 +1601,11 @@ def fetch_latest_history_order_items_for_client(setor_desc: str) -> pd.DataFrame
 
 
 def fetch_latest_approved_order_items_for_setor(setor_codigo: str, setor_desc: str) -> pd.DataFrame:
+    # Prefer historical orders as the comparison source.
+    history_reference = fetch_latest_history_order_items_for_client(setor_desc)
+    if not history_reference.empty:
+        return history_reference
+
     if firestore_enabled():
         approved = fetch_firestore_rows_raw("pedido")
     else:
@@ -1599,9 +1617,8 @@ def fetch_latest_approved_order_items_for_setor(setor_codigo: str, setor_desc: s
     # Match by client description only to avoid coupling historical comparison to client IDs.
     desc_mask = approved.get("SETOR2", pd.Series(dtype=str)).astype(str).str.strip().str.lower() == str(setor_desc).strip().lower()
     approved = approved[desc_mask].copy()
-
     if approved.empty:
-        return fetch_latest_history_order_items_for_client(setor_desc)
+        return pd.DataFrame()
 
     approved["__approved_dt"] = approved.get("approved_at").apply(coerce_datetime)
     approved = approved.sort_values("__approved_dt", ascending=False, na_position="last")
