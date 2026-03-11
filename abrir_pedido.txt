@@ -124,6 +124,7 @@ Cod. Produto	Descr. Produto	Valor
 37054	Pano de microfibra 40 cm x 60 cm azul 01                	R$ 14.50
 10552	Pano multiuso 5 un inoven                	R$ 0.00
 13222	Pano rolo 25 m x 28 cm azul 01 un inoven                	R$ 16.20
+11936	Pano rolo 25 m x 28 cm azul 01 un lifecl                	R$ 16.20
 11866	Pano rolo 300 m x 33 cm x 45 gr branco o                	R$ 287.50
 50295	Papel hig. folha dupla 64 rolos neve                	R$ 154.00
 50336	Papel hig. folha dupla 64 rolos personal                	R$ 103.00
@@ -215,6 +216,7 @@ Cod. Produto	Descr. Produto	Valor
 50337	Toalha 2 db f.dupla 22 cm x 20 cm bco 20                	R$ 64.90
 10137	Touca descartavel tnt 100 un                	R$ 16.90
 20962	Vaselina liquida comum 1 l                	R$ 21.30
+31025	Vassoura de palha com cabo plastificado                	R$ 24.50
 31127	Vassoura de teto cabo madeira 2 m                	R$ 15.94
 32089	Vassoura magica varredora feiticeira lim                	R$ 105.90
 31132	Vassoura multiuso com cabo azul ref 9673                	R$ 18.90
