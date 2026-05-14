@@ -858,13 +858,13 @@ def fetch_collection_df(collection: str, columns: List[str]) -> pd.DataFrame:
     return df
 
 
-@st.cache_data(show_spinner=False, ttl=120)
+@st.cache_data(show_spinner=False, ttl=600)
 def fetch_products_df() -> pd.DataFrame:
     columns = ["productCode", "name", "price"]
     return fetch_collection_df(FIRESTORE_PRODUCTS_COLLECTION, columns)
 
 
-@st.cache_data(show_spinner=False, ttl=120)
+@st.cache_data(show_spinner=False, ttl=600)
 def fetch_setores_df() -> pd.DataFrame:
     columns = ["CódUnidade", "items__description"]
     return fetch_collection_df(FIRESTORE_SETORES_COLLECTION, columns)
@@ -987,6 +987,7 @@ def save_product_history(changes_df: pd.DataFrame, source_label: str) -> None:
 
         if op_count:
             batch.commit()
+        _fetch_product_history_firestore.clear()
     else:
         local_history = st.session_state.get("product_history_local", [])
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1007,33 +1008,37 @@ def save_product_history(changes_df: pd.DataFrame, source_label: str) -> None:
         st.session_state.product_history_local = local_history
 
 
+@st.cache_data(show_spinner=False, ttl=300)
+def _fetch_product_history_firestore(limit: int) -> pd.DataFrame:
+    db = get_firestore_client()
+    if not db:
+        return pd.DataFrame()
+    rows = []
+    try:
+        docs = (
+            db.collection(FIRESTORE_PRODUCT_HISTORY_COLLECTION)
+            .order_by("changed_at", direction=firestore.Query.DESCENDING)
+            .limit(limit)
+            .stream()
+        )
+    except Exception:
+        docs = db.collection(FIRESTORE_PRODUCT_HISTORY_COLLECTION).stream()
+    for doc in docs:
+        data = doc.to_dict() or {}
+        data["__doc_id"] = doc.id
+        rows.append(data)
+    if not rows:
+        return pd.DataFrame()
+    history_df = pd.DataFrame(rows)
+    if "changed_at" in history_df.columns:
+        history_df["changed_at_dt"] = history_df["changed_at"].apply(coerce_datetime)
+        history_df = history_df.sort_values("changed_at_dt", ascending=False, na_position="last")
+    return history_df
+
+
 def fetch_product_history(limit: int = 300) -> pd.DataFrame:
     if firestore_enabled():
-        db = get_firestore_client()
-        rows = []
-        try:
-            docs = (
-                db.collection(FIRESTORE_PRODUCT_HISTORY_COLLECTION)
-                .order_by("changed_at", direction=firestore.Query.DESCENDING)
-                .limit(limit)
-                .stream()
-            )
-        except Exception:
-            docs = db.collection(FIRESTORE_PRODUCT_HISTORY_COLLECTION).stream()
-
-        for doc in docs:
-            data = doc.to_dict() or {}
-            data["__doc_id"] = doc.id
-            rows.append(data)
-
-        if not rows:
-            return pd.DataFrame()
-
-        history_df = pd.DataFrame(rows)
-        if "changed_at" in history_df.columns:
-            history_df["changed_at_dt"] = history_df["changed_at"].apply(coerce_datetime)
-            history_df = history_df.sort_values("changed_at_dt", ascending=False, na_position="last")
-        return history_df
+        return _fetch_product_history_firestore(limit)
 
     local_history = st.session_state.get("product_history_local", [])
     if not local_history:
@@ -1433,6 +1438,7 @@ def apply_layout_theme(use_new_layout: bool) -> None:
     )
 
 
+@st.cache_resource
 def get_company_logo_path() -> Optional[str]:
     base_dir = os.path.dirname(__file__)
     for relative_path in LOGO_CANDIDATE_FILES:
@@ -1450,6 +1456,7 @@ def render_company_branding() -> None:
         st.markdown(f"### 🏢 {COMPANY_NAME}")
 
 
+@st.cache_resource
 def get_user_avatar_path() -> Optional[str]:
     base_dir = os.path.dirname(__file__)
     for relative_path in AVATAR_CANDIDATE_FILES:
@@ -1553,21 +1560,43 @@ def fetch_latest_history_order_items_for_client(setor_desc: str) -> pd.DataFrame
         return pd.DataFrame()
 
     try:
-        history_docs = db.collection("historico_pedidos").stream()
-        history_rows = []
         target_desc = str(setor_desc).strip().lower()
+        history_rows = []
 
-        for doc in history_docs:
-            data = doc.to_dict() or {}
-            client_name = str(data.get("client_name") or data.get("SETOR2") or "").strip().lower()
-            if client_name != target_desc:
-                continue
+        # Try server-side filter first (fast path — avoids full collection scan)
+        for field in ("client_name", "SETOR2"):
+            try:
+                filtered_docs = (
+                    db.collection("historico_pedidos")
+                    .where(field, "==", str(setor_desc).strip())
+                    .stream()
+                )
+                for doc in filtered_docs:
+                    data = doc.to_dict() or {}
+                    client_name = str(data.get("client_name") or data.get("SETOR2") or "").strip().lower()
+                    if client_name == target_desc:
+                        approved_dt = coerce_datetime(data.get("approved_at"))
+                        export_dt = coerce_datetime(data.get("export_date"))
+                        created_dt = coerce_datetime(data.get("created_at"))
+                        sort_dt = approved_dt or export_dt or created_dt
+                        history_rows.append((sort_dt, data))
+            except Exception:
+                pass
+            if history_rows:
+                break
 
-            approved_dt = coerce_datetime(data.get("approved_at"))
-            export_dt = coerce_datetime(data.get("export_date"))
-            created_dt = coerce_datetime(data.get("created_at"))
-            sort_dt = approved_dt or export_dt or created_dt
-            history_rows.append((sort_dt, data))
+        # Fallback: full scan (covers legacy records with different casing/fields)
+        if not history_rows:
+            for doc in db.collection("historico_pedidos").stream():
+                data = doc.to_dict() or {}
+                client_name = str(data.get("client_name") or data.get("SETOR2") or "").strip().lower()
+                if client_name != target_desc:
+                    continue
+                approved_dt = coerce_datetime(data.get("approved_at"))
+                export_dt = coerce_datetime(data.get("export_date"))
+                created_dt = coerce_datetime(data.get("created_at"))
+                sort_dt = approved_dt or export_dt or created_dt
+                history_rows.append((sort_dt, data))
 
         if not history_rows:
             return pd.DataFrame()
@@ -2030,6 +2059,8 @@ def persist_cart(destino: str) -> None:
     
     st.success(f"✅ Pedido do cliente '{st.session_state.selected_setor.get('descricao', 'cliente')}' salvo com sucesso!")
     st.session_state.cart = []
+    st.session_state["_previa_pdf"] = None
+    st.session_state["_previa_pdf_key"] = None
     st.success(
         f"{len(linhas)} item(ns) salvo(s) em '{destino}'. Atualize a aba correspondente para visualizar."
     )
@@ -2421,24 +2452,6 @@ def generate_history_order_pdf(order: Dict, client_label: str, setor_label: str)
     return buffer
 
 
-def coerce_datetime(value: object) -> Optional[datetime]:
-    if hasattr(value, "to_datetime"):
-        value = value.to_datetime()
-    if isinstance(value, datetime):
-        return value
-    if value is None or value == "":
-        return None
-    try:
-        parsed = pd.to_datetime(value, errors="coerce")
-        if pd.isna(parsed):
-            return None
-        if hasattr(parsed, "to_pydatetime"):
-            return parsed.to_pydatetime()
-        return parsed
-    except Exception:
-        return None
-
-
 def format_datetime_display(value: object) -> str:
     converted = coerce_datetime(value)
     if converted is None:
@@ -2551,15 +2564,30 @@ def generate_history_batch_pdf(selected_orders: List[Dict]) -> io.BytesIO:
     return buffer
 
 
+def _previa_cache_key() -> str:
+    cart = st.session_state.get("cart", [])
+    setor = st.session_state.get("selected_setor") or {}
+    return str(hash((str(cart), str(setor.get("codigo", "")))))
+
+
 def render_previa_download() -> None:
-    pdf_buffer = generate_previa_pdf()
+    cart = st.session_state.get("cart")
+    setor = st.session_state.get("selected_setor")
+    if not cart or not setor:
+        return
+
+    cache_key = _previa_cache_key()
+    if st.session_state.get("_previa_pdf_key") != cache_key:
+        st.session_state["_previa_pdf"] = generate_previa_pdf()
+        st.session_state["_previa_pdf_key"] = cache_key
+
+    pdf_buffer = st.session_state.get("_previa_pdf")
     if pdf_buffer is None:
         return
 
     st.info("📋 Prévia do pedido gerada")
-    setor = st.session_state.selected_setor
     file_name = f"PREVIA_Pedido_{setor['codigo']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-    
+
     col1, col2 = st.columns(2)
     with col1:
         st.download_button(
@@ -2586,8 +2614,6 @@ def render_save_buttons() -> None:
 def update_excel_snapshot() -> None:
     if st.session_state.excel_data is None:
         return
-    if firestore_enabled():
-        sync_firestore_to_session()
     buffer = build_workbook_bytes(st.session_state.excel_data)
     st.session_state.excel_bytes = buffer.getvalue()
 
@@ -2946,9 +2972,6 @@ def render_download_section() -> None:
 
 
 def render_aguardando_tab() -> None:
-    if firestore_enabled():
-        sync_firestore_to_session()
-
     current_user = st.session_state.get("current_user")
     user_info = get_user_info(current_user)
     can_edit_aguardando = user_info.get("role") in {"admin", "user"}
