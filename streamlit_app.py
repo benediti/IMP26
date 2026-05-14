@@ -3541,92 +3541,115 @@ def render_aguardando_tab() -> None:
                     
                     col_save, col_cancel = st.columns(2)
                     with col_save:
-                        if st.button("💾 Salvar alteracoes", key=f"save_edit_{group_id}", use_container_width=True):
-                            if firestore_enabled():
-                                db = get_firestore_client()
-                                batch = db.batch()
-                                op_count = 0
-                                max_ops = 450
-                                
-                                # Remove items
-                                for doc_id in st.session_state[f"removed_items_{group_id}"]:
-                                    doc_ref = db.collection(FIRESTORE_COLLECTION).document(doc_id)
-                                    batch.delete(doc_ref)
-                                    op_count += 1
-                                    if op_count >= max_ops:
-                                        batch.commit()
-                                        batch = db.batch()
-                                        op_count = 0
-                                
-                                # Update quantities for existing items
-                                for item in edit_data:
-                                    if not item["is_new"] and item["doc_id"] not in removed_ids:
-                                        new_qtde = qtde_dict.get(item["doc_id"], item["qtde"])
-                                        new_total = item["preco"] * new_qtde
-                                        doc_ref = db.collection(FIRESTORE_COLLECTION).document(item["doc_id"])
-                                        batch.update(doc_ref, {
-                                            "Qtde": int(new_qtde),
-                                            "$ Total": float(new_total),
-                                            "updated_at": firestore.SERVER_TIMESTAMP,
-                                        })
-                                        op_count += 1
-                                        if op_count >= max_ops:
-                                            batch.commit()
-                                            batch = db.batch()
-                                            op_count = 0
-                                
-                                # Add new items to Firestore
-                                setor = st.session_state.get("selected_setor")
-                                if not setor and not group_df.empty:
-                                    first_row = group_df.iloc[0]
-                                    setor = {
-                                        "codigo": str(first_row.get("Setor") or first_row.get("Unidade") or ""),
-                                        "descricao": str(first_row.get("SETOR2") or first_row.get("Setor") or "cliente"),
-                                    }
-                                if setor and setor.get("codigo"):
-                                    for new_item in st.session_state[f"new_items_{group_id}"]:
-                                        payload = {
-                                            "CòdClienteImpakto": COD_CLIENTE_IMPAKTO,
-                                            "CódProImpakto": new_item["codigo"],
-                                            "Item": new_item["nome"],
-                                            "Qtde": int(new_item["qtde"]),
-                                            "$ Unitário": float(new_item["preco"]),
-                                            "$ Total": float(new_item["preco"] * new_item["qtde"]),
-                                            "Unidade": setor["codigo"],
-                                            "Setor": setor["codigo"],
-                                            "SETOR2": setor["descricao"],
-                                            "status": "aguardando",
-                                            "pending_order_id": group_pending_id or group_id,
-                                            "client_name": setor.get("descricao", "cliente"),
-                                            "pdf_path": None,
-                                            "created_at": firestore.SERVER_TIMESTAMP,
-                                            "updated_at": firestore.SERVER_TIMESTAMP,
-                                        }
-                                        doc_ref = db.collection(FIRESTORE_COLLECTION).document()
-                                        batch.set(doc_ref, payload)
-                                        op_count += 1
-                                        if op_count >= max_ops:
-                                            batch.commit()
-                                            batch = db.batch()
-                                            op_count = 0
-                                elif st.session_state[f"new_items_{group_id}"]:
-                                    st.error("Selecione um setor antes de salvar novos itens.")
+                        if st.button("💾 Salvar alterações", key=f"save_edit_{group_id}", use_container_width=True):
+                            if not firestore_enabled():
+                                st.warning("⚠️ Firestore não disponível. Alterações não foram salvas.")
+                            else:
+                                try:
+                                    db = get_firestore_client()
+                                    batch = db.batch()
+                                    op_count = 0
+                                    max_ops = 450
+                                    changes_log = []
 
-                                if op_count:
-                                    batch.commit()
-                                
-                                # Release edit lock
-                                release_edit_lock(group_id, current_user)
-                                
-                                # Clear session state tracking
-                                st.session_state[f"new_items_{group_id}"] = []
-                                st.session_state[f"removed_items_{group_id}"] = []
-                                if f"qtde_tracking_{group_id}" in st.session_state:
-                                    del st.session_state[f"qtde_tracking_{group_id}"]
-                                
-                                sync_firestore_to_session()
-                                st.success("✅ Alteracoes salvas!")
-                                st.rerun()
+                                    removed_ids_list = list(st.session_state.get(f"removed_items_{group_id}", []))
+
+                                    # Step 1: Delete removed items
+                                    for doc_id in removed_ids_list:
+                                        batch.delete(db.collection(FIRESTORE_COLLECTION).document(doc_id))
+                                        changes_log.append(f"item removido")
+                                        op_count += 1
+                                        if op_count >= max_ops:
+                                            batch.commit(); batch = db.batch(); op_count = 0
+
+                                    # Step 2: Update quantities — read directly from widget state
+                                    # (more reliable than qtde_dict, which depends on render order)
+                                    for i, item in enumerate(edit_data):
+                                        if item["is_new"] or item["doc_id"] in removed_ids_list:
+                                            continue
+                                        qty_key = f"qtde_{group_id}_{i}"
+                                        # Read from widget state first, fall back to tracking, then original
+                                        raw_qty = st.session_state.get(qty_key)
+                                        if raw_qty is None:
+                                            raw_qty = st.session_state.get(f"qtde_tracking_{group_id}", {}).get(item["doc_id"])
+                                        if raw_qty is None:
+                                            raw_qty = item["qtde"]
+                                        saved_qty = max(1, int(raw_qty))
+                                        new_total = item["preco"] * saved_qty
+                                        batch.update(
+                                            db.collection(FIRESTORE_COLLECTION).document(item["doc_id"]),
+                                            {"Qtde": saved_qty, "$ Total": float(new_total), "updated_at": firestore.SERVER_TIMESTAMP},
+                                        )
+                                        if saved_qty != item["qtde"]:
+                                            changes_log.append(f"{item['nome']}: {item['qtde']} → {saved_qty}")
+                                        op_count += 1
+                                        if op_count >= max_ops:
+                                            batch.commit(); batch = db.batch(); op_count = 0
+
+                                    # Step 3: Add new items
+                                    new_items_list = list(st.session_state.get(f"new_items_{group_id}", []))
+                                    if new_items_list:
+                                        # Determine setor from multiple sources
+                                        setor_codigo = ""
+                                        setor_descricao = "cliente"
+                                        sel = st.session_state.get("selected_setor")
+                                        if sel:
+                                            setor_codigo = str(sel.get("codigo", ""))
+                                            setor_descricao = str(sel.get("descricao", "cliente"))
+                                        if not setor_codigo and not group_df.empty:
+                                            fr = group_df.iloc[0]
+                                            setor_codigo = str(fr.get("Setor") or fr.get("Unidade") or "")
+                                            setor_descricao = str(fr.get("SETOR2") or fr.get("client_name") or fr.get("Setor") or "cliente")
+                                        if not setor_codigo:
+                                            setor_codigo = str(group_pending_id or group_id)[:20]
+
+                                        for new_item in new_items_list:
+                                            payload = {
+                                                "CòdClienteImpakto": COD_CLIENTE_IMPAKTO,
+                                                "CódProImpakto": new_item["codigo"],
+                                                "Item": new_item["nome"],
+                                                "Qtde": int(new_item["qtde"]),
+                                                "$ Unitário": float(new_item["preco"]),
+                                                "$ Total": float(new_item["preco"] * new_item["qtde"]),
+                                                "Unidade": setor_codigo,
+                                                "Setor": setor_codigo,
+                                                "SETOR2": setor_descricao,
+                                                "status": "aguardando",
+                                                "pending_order_id": group_pending_id or group_id,
+                                                "client_name": setor_descricao,
+                                                "pdf_path": None,
+                                                "created_at": firestore.SERVER_TIMESTAMP,
+                                                "updated_at": firestore.SERVER_TIMESTAMP,
+                                            }
+                                            batch.set(db.collection(FIRESTORE_COLLECTION).document(), payload)
+                                            changes_log.append(f"adicionado: {new_item['nome']} (qty {new_item['qtde']})")
+                                            op_count += 1
+                                            if op_count >= max_ops:
+                                                batch.commit(); batch = db.batch(); op_count = 0
+
+                                    # Commit remaining operations
+                                    if op_count:
+                                        batch.commit()
+
+                                    # Clean up ALL state for this group
+                                    st.session_state.edit_client = None
+                                    release_edit_lock(group_id, current_user)
+                                    st.session_state[f"new_items_{group_id}"] = []
+                                    st.session_state[f"removed_items_{group_id}"] = []
+                                    keys_to_del = [k for k in st.session_state if k.startswith(f"qtde_{group_id}_")]
+                                    for k in keys_to_del:
+                                        del st.session_state[k]
+                                    if f"qtde_tracking_{group_id}" in st.session_state:
+                                        del st.session_state[f"qtde_tracking_{group_id}"]
+
+                                    sync_firestore_to_session()
+                                    if changes_log:
+                                        st.success("✅ Salvo: " + " | ".join(changes_log))
+                                    else:
+                                        st.success("✅ Pedido salvo (sem alterações de quantidade).")
+                                    st.rerun()
+                                except Exception as _save_exc:
+                                    st.error(f"❌ Erro ao salvar alterações: {_save_exc}")
                     
                     with col_cancel:
                         if st.button("❌ Cancelar", key=f"cancel_edit_{group_id}", use_container_width=True):
