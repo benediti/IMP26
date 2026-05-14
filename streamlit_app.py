@@ -4034,6 +4034,128 @@ def render_history_tab() -> None:
         st.error(f"❌ Erro ao carregar histórico: {e}")
 
 
+def render_catalog_editor_tab() -> None:
+    st.subheader("✏️ Editar Catálogo")
+
+    if st.session_state.get("current_user") != "admin":
+        st.warning("⚠️ Apenas admins podem editar o catálogo.")
+        return
+
+    tab_prod, tab_setor = st.tabs(["📦 Produtos", "🏢 Setores"])
+
+    # ── Produtos ──────────────────────────────────────────────────────────────
+    with tab_prod:
+        st.caption(
+            "Edite preços e nomes diretamente na tabela. "
+            "Use a última linha em branco para adicionar novos produtos. "
+            "Clique em **Salvar Produtos** para enviar ao Firestore."
+        )
+
+        raw_prod = fetch_products_df()
+        prod_df = normalize_products_df(raw_prod)
+        prod_df = prod_df.drop(columns=["__doc_id"], errors="ignore")
+
+        edited_prod = st.data_editor(
+            prod_df,
+            num_rows="dynamic",
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "productCode": st.column_config.TextColumn("Código", required=True),
+                "name": st.column_config.TextColumn("Nome do Produto", width="large"),
+                "price": st.column_config.NumberColumn(
+                    "Preço (R$)", format="R$ %.2f", min_value=0.0, step=0.01
+                ),
+            },
+            key="catalog_editor_produtos",
+        )
+
+        col_save, col_reset = st.columns([2, 1])
+        with col_save:
+            if st.button("💾 Salvar Produtos", type="primary", use_container_width=True):
+                new_prod = normalize_products_df(edited_prod)
+                if new_prod.empty:
+                    st.error("Nenhum produto válido para salvar.")
+                else:
+                    changes = compute_product_changes(prod_df, new_prod)
+                    if firestore_enabled():
+                        upsert_collection_from_df(FIRESTORE_PRODUCTS_COLLECTION, new_prod, "productCode")
+                        fetch_products_df.clear()
+                        sync_firestore_reference_data()
+                    else:
+                        if st.session_state.excel_data is None:
+                            st.session_state.excel_data = {}
+                        st.session_state.excel_data["Produtos"] = new_prod
+                    save_product_history(changes, "editor_catalogo")
+                    log_audit(
+                        "catalog_products_saved",
+                        {"items_changed": int(len(changes)), "total": int(len(new_prod))},
+                    )
+                    st.success(f"✅ {len(new_prod)} produto(s) salvos. {len(changes)} alteração(ões) registrada(s).")
+                    st.rerun()
+        with col_reset:
+            if st.button("🔄 Recarregar do Firestore", use_container_width=True):
+                fetch_products_df.clear()
+                sync_firestore_reference_data()
+                st.rerun()
+
+    # ── Setores ───────────────────────────────────────────────────────────────
+    with tab_setor:
+        st.caption(
+            "Edite o código e descrição dos setores. "
+            "Use a última linha em branco para adicionar novos setores. "
+            "Clique em **Salvar Setores** para enviar ao Firestore."
+        )
+
+        raw_set = fetch_setores_df()
+        set_df = raw_set.drop(columns=["__doc_id"], errors="ignore").copy()
+        for col in ["CódUnidade", "items__description"]:
+            if col not in set_df.columns:
+                set_df[col] = ""
+        set_df = set_df[["CódUnidade", "items__description"]]
+        set_df["CódUnidade"] = set_df["CódUnidade"].astype(str).str.strip()
+        set_df["items__description"] = set_df["items__description"].astype(str).str.strip()
+        set_df = set_df[set_df["CódUnidade"].str.len() > 0].sort_values("CódUnidade").reset_index(drop=True)
+
+        edited_set = st.data_editor(
+            set_df,
+            num_rows="dynamic",
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "CódUnidade": st.column_config.TextColumn("Código do Setor", required=True),
+                "items__description": st.column_config.TextColumn("Descrição do Setor", width="large"),
+            },
+            key="catalog_editor_setores",
+        )
+
+        col_save2, col_reset2 = st.columns([2, 1])
+        with col_save2:
+            if st.button("💾 Salvar Setores", type="primary", use_container_width=True):
+                new_set = edited_set.copy()
+                new_set["CódUnidade"] = new_set["CódUnidade"].astype(str).str.strip()
+                new_set = new_set[new_set["CódUnidade"].str.len() > 0].drop_duplicates(subset=["CódUnidade"], keep="last")
+                if new_set.empty:
+                    st.error("Nenhum setor válido para salvar.")
+                else:
+                    if firestore_enabled():
+                        upsert_collection_from_df(FIRESTORE_SETORES_COLLECTION, new_set, "CódUnidade")
+                        fetch_setores_df.clear()
+                        sync_firestore_reference_data()
+                    else:
+                        if st.session_state.excel_data is None:
+                            st.session_state.excel_data = {}
+                        st.session_state.excel_data["Setor"] = new_set
+                    log_audit("catalog_setores_saved", {"total": int(len(new_set))})
+                    st.success(f"✅ {len(new_set)} setor(es) salvos com sucesso.")
+                    st.rerun()
+        with col_reset2:
+            if st.button("🔄 Recarregar do Firestore", use_container_width=True, key="reload_setores"):
+                fetch_setores_df.clear()
+                sync_firestore_reference_data()
+                st.rerun()
+
+
 def render_product_update_tab() -> None:
     st.subheader("📦 Atualização de Produtos")
 
@@ -4512,6 +4634,7 @@ def main() -> None:
             ]
             if is_admin:
                 nav_items.append(("produtos", "📦 Atualizar Produtos"))
+                nav_items.append(("catalogo", "✏️ Editar Catálogo"))
                 nav_items.append(("usuarios", "👥 Gerenciar Usuários"))
 
             if "layout_nav_page" not in st.session_state:
@@ -4569,6 +4692,8 @@ def main() -> None:
             render_history_tab()
         elif current_page == "produtos" and st.session_state.get("current_user") == "admin":
             render_product_update_tab()
+        elif current_page == "catalogo" and st.session_state.get("current_user") == "admin":
+            render_catalog_editor_tab()
         elif current_page == "usuarios" and st.session_state.get("current_user") == "admin":
             render_user_management_tab()
         else:
@@ -4576,12 +4701,13 @@ def main() -> None:
     else:
         # Create tabs based on user role (layout antigo)
         if st.session_state.get("current_user") == "admin":
-            tab_novo, tab_aguardando, tab_aprovados, tab_historico, tab_produtos, tab_usuarios = st.tabs([
-                "Novo Pedido", 
-                "Aguardando Aprovação", 
+            tab_novo, tab_aguardando, tab_aprovados, tab_historico, tab_produtos, tab_catalogo, tab_usuarios = st.tabs([
+                "Novo Pedido",
+                "Aguardando Aprovação",
                 "📋 Pedidos Aprovados",
                 "📚 Histórico de Pedidos",
                 "📦 Atualizar Produtos",
+                "✏️ Editar Catálogo",
                 "👥 Gerenciar Usuários"
             ])
         else:
@@ -4604,6 +4730,8 @@ def main() -> None:
         if st.session_state.get("current_user") == "admin":
             with tab_produtos:
                 render_product_update_tab()
+            with tab_catalogo:
+                render_catalog_editor_tab()
             with tab_usuarios:
                 render_user_management_tab()
 
