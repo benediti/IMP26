@@ -24,6 +24,7 @@ FIRESTORE_PDF_BUCKET = "material-basico"
 FIRESTORE_AUDIT_COLLECTION = "audit_trail"
 FIRESTORE_USERS_COLLECTION = "users"
 FIRESTORE_PRODUCT_HISTORY_COLLECTION = "historico_produtos"
+FIRESTORE_SETORES_HISTORY_COLLECTION = "historico_setores"
 COMPANY_NAME = "IMPAKTO"
 LOGO_CANDIDATE_FILES = [
     "logo.png",
@@ -298,6 +299,14 @@ def get_user_info(username: str) -> Dict:
         pass
     
     return {"role": "user", "assigned_setores": []}
+
+
+def can_edit_catalog() -> bool:
+    current_user = st.session_state.get("current_user")
+    if current_user == "admin":
+        return True
+    user_info = get_user_info(current_user)
+    return user_info.get("role") in {"admin", "catalog_editor"}
 
 
 def filter_setores_for_user(setores_df: pd.DataFrame, user_info: Dict) -> pd.DataFrame:
@@ -1049,6 +1058,78 @@ def fetch_product_history(limit: int = 300) -> pd.DataFrame:
         history_df["changed_at_dt"] = pd.to_datetime(history_df["changed_at"], errors="coerce")
         history_df = history_df.sort_values("changed_at_dt", ascending=False, na_position="last")
     return history_df
+
+
+def save_setores_history(old_df: pd.DataFrame, new_df: pd.DataFrame) -> None:
+    username = st.session_state.get("current_user", "unknown")
+    old_map = {str(r["CódUnidade"]).strip(): str(r.get("items__description", "")) for _, r in old_df.iterrows()}
+    new_map = {str(r["CódUnidade"]).strip(): str(r.get("items__description", "")) for _, r in new_df.iterrows()}
+    all_codes = set(old_map) | set(new_map)
+    changes = []
+    for code in all_codes:
+        old_desc = old_map.get(code)
+        new_desc = new_map.get(code)
+        if old_desc is None:
+            change_type = "Novo"
+        elif new_desc is None:
+            change_type = "Removido"
+        elif old_desc != new_desc:
+            change_type = "Descrição Alterada"
+        else:
+            continue
+        changes.append({"codigo": code, "old_desc": old_desc or "", "new_desc": new_desc or "", "change_type": change_type})
+
+    if not changes:
+        return
+
+    if firestore_enabled():
+        db = get_firestore_client()
+        batch = db.batch()
+        op_count = 0
+        for ch in changes:
+            payload = {**ch, "changed_by": username, "changed_at": firestore.SERVER_TIMESTAMP}
+            batch.set(db.collection(FIRESTORE_SETORES_HISTORY_COLLECTION).document(), payload)
+            op_count += 1
+            if op_count >= 450:
+                batch.commit()
+                batch = db.batch()
+                op_count = 0
+        if op_count:
+            batch.commit()
+        _fetch_setores_history_firestore.clear()
+
+
+@st.cache_data(show_spinner=False, ttl=300)
+def _fetch_setores_history_firestore(limit: int) -> pd.DataFrame:
+    db = get_firestore_client()
+    if not db:
+        return pd.DataFrame()
+    rows = []
+    try:
+        docs = (
+            db.collection(FIRESTORE_SETORES_HISTORY_COLLECTION)
+            .order_by("changed_at", direction=firestore.Query.DESCENDING)
+            .limit(limit)
+            .stream()
+        )
+    except Exception:
+        docs = db.collection(FIRESTORE_SETORES_HISTORY_COLLECTION).stream()
+    for doc in docs:
+        data = doc.to_dict() or {}
+        rows.append(data)
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    if "changed_at" in df.columns:
+        df["changed_at_dt"] = df["changed_at"].apply(coerce_datetime)
+        df = df.sort_values("changed_at_dt", ascending=False, na_position="last")
+    return df
+
+
+def fetch_setores_history(limit: int = 200) -> pd.DataFrame:
+    if firestore_enabled():
+        return _fetch_setores_history_firestore(limit)
+    return pd.DataFrame()
 
 
 def sync_firestore_reference_data() -> None:
@@ -4060,11 +4141,13 @@ def render_history_tab() -> None:
 def render_catalog_editor_tab() -> None:
     st.subheader("✏️ Editar Catálogo")
 
-    if st.session_state.get("current_user") != "admin":
-        st.warning("⚠️ Apenas admins podem editar o catálogo.")
+    if not can_edit_catalog():
+        st.warning("⚠️ Você não tem permissão para editar o catálogo.")
         return
 
-    tab_prod, tab_setor = st.tabs(["📦 Produtos", "🏢 Setores"])
+    tab_prod, tab_setor, tab_hist_prod, tab_hist_setor = st.tabs([
+        "📦 Produtos", "🏢 Setores", "📋 Histórico Produtos", "📋 Histórico Setores"
+    ])
 
     # ── Produtos ──────────────────────────────────────────────────────────────
     with tab_prod:
@@ -4161,6 +4244,7 @@ def render_catalog_editor_tab() -> None:
                 if new_set.empty:
                     st.error("Nenhum setor válido para salvar.")
                 else:
+                    save_setores_history(set_df, new_set)
                     if firestore_enabled():
                         upsert_collection_from_df(FIRESTORE_SETORES_COLLECTION, new_set, "CódUnidade")
                         fetch_setores_df.clear()
@@ -4177,6 +4261,57 @@ def render_catalog_editor_tab() -> None:
                 fetch_setores_df.clear()
                 sync_firestore_reference_data()
                 st.rerun()
+
+    # ── Histórico de Produtos ─────────────────────────────────────────────────
+    with tab_hist_prod:
+        st.caption("Registro de todas as alterações de produtos com data e responsável.")
+        if st.button("🔄 Atualizar histórico", key="refresh_hist_prod"):
+            _fetch_product_history_firestore.clear()
+            st.rerun()
+        hist_prod = fetch_product_history(limit=500)
+        if hist_prod.empty:
+            st.info("Nenhuma alteração de produto registrada ainda.")
+        else:
+            disp = hist_prod.copy()
+            disp["Data"] = disp.get("changed_at", pd.Series()).apply(
+                lambda v: coerce_datetime(v).strftime("%d/%m/%Y %H:%M") if coerce_datetime(v) else str(v)
+            )
+            disp["Preço Anterior"] = pd.to_numeric(disp.get("old_price", 0), errors="coerce").fillna(0).apply(format_currency)
+            disp["Preço Novo"] = pd.to_numeric(disp.get("new_price", 0), errors="coerce").fillna(0).apply(format_currency)
+            disp["Diferença"] = pd.to_numeric(disp.get("diff_price", 0), errors="coerce").fillna(0).apply(format_currency)
+            disp = disp.rename(columns={
+                "productCode": "Código",
+                "name": "Produto",
+                "change_type": "Tipo",
+                "changed_by": "Alterado por",
+                "source": "Origem",
+            })
+            cols = [c for c in ["Data", "Alterado por", "Código", "Produto", "Tipo", "Preço Anterior", "Preço Novo", "Diferença", "Origem"] if c in disp.columns]
+            st.dataframe(disp[cols], use_container_width=True, hide_index=True)
+
+    # ── Histórico de Setores ──────────────────────────────────────────────────
+    with tab_hist_setor:
+        st.caption("Registro de todas as alterações de setores com data e responsável.")
+        if st.button("🔄 Atualizar histórico", key="refresh_hist_setor"):
+            _fetch_setores_history_firestore.clear()
+            st.rerun()
+        hist_set = fetch_setores_history(limit=200)
+        if hist_set.empty:
+            st.info("Nenhuma alteração de setor registrada ainda.")
+        else:
+            disp2 = hist_set.copy()
+            disp2["Data"] = disp2.get("changed_at", pd.Series()).apply(
+                lambda v: coerce_datetime(v).strftime("%d/%m/%Y %H:%M") if coerce_datetime(v) else str(v)
+            )
+            disp2 = disp2.rename(columns={
+                "codigo": "Código",
+                "old_desc": "Descrição Anterior",
+                "new_desc": "Descrição Nova",
+                "change_type": "Tipo",
+                "changed_by": "Alterado por",
+            })
+            cols2 = [c for c in ["Data", "Alterado por", "Código", "Tipo", "Descrição Anterior", "Descrição Nova"] if c in disp2.columns]
+            st.dataframe(disp2[cols2], use_container_width=True, hide_index=True)
 
 
 def render_product_update_tab() -> None:
@@ -4394,7 +4529,7 @@ def render_user_management_tab() -> None:
         with col1:
             new_username = st.text_input("👤 Nome de usuário")
         with col2:
-            new_role = st.selectbox("📌 Função", ["user", "admin", "supervisora"])
+            new_role = st.selectbox("📌 Função", ["user", "admin", "supervisora", "catalog_editor"])
         
         new_password = st.text_input("🔑 Senha", type="password")
         confirm_password = st.text_input("🔑 Confirmar Senha", type="password")
@@ -4493,7 +4628,19 @@ def render_user_management_tab() -> None:
                         st.rerun()
 
             with col3:
-                st.write("")  # Placeholder for alignment
+                st.markdown("**Alterar Função**")
+                user_data = next((u for u in users if u["username"] == selected_user), {})
+                current_role = user_data.get("role", "user")
+                all_roles = ["user", "admin", "supervisora", "catalog_editor"]
+                role_idx = all_roles.index(current_role) if current_role in all_roles else 0
+                new_role_edit = st.selectbox("Nova Função", all_roles, index=role_idx, key="edit_role_select")
+                if st.button("✅ Atualizar Função", use_container_width=True):
+                    db = get_firestore_client()
+                    if db:
+                        db.collection(FIRESTORE_USERS_COLLECTION).document(selected_user).update({"role": new_role_edit})
+                        log_audit("update_user_role", {"username": selected_user, "new_role": new_role_edit})
+                        st.session_state["user_action_message"] = f"✅ Função de '{selected_user}' alterada para '{new_role_edit}'!"
+                        st.rerun()
 
 
 def render_supervisora_mobile_view(user_info: Dict) -> None:
@@ -4649,6 +4796,7 @@ def main() -> None:
 
         if st.session_state.get("layout_mode_new"):
             is_admin = st.session_state.get("current_user") == "admin"
+            catalog_access = can_edit_catalog()
             nav_items = [
                 ("novo", "🛒 Novo Pedido"),
                 ("aguardando", "⏳ Aguardando Aprovação"),
@@ -4657,7 +4805,9 @@ def main() -> None:
             ]
             if is_admin:
                 nav_items.append(("produtos", "📦 Atualizar Produtos"))
+            if catalog_access:
                 nav_items.append(("catalogo", "✏️ Editar Catálogo"))
+            if is_admin:
                 nav_items.append(("usuarios", "👥 Gerenciar Usuários"))
 
             if "layout_nav_page" not in st.session_state:
@@ -4715,7 +4865,7 @@ def main() -> None:
             render_history_tab()
         elif current_page == "produtos" and st.session_state.get("current_user") == "admin":
             render_product_update_tab()
-        elif current_page == "catalogo" and st.session_state.get("current_user") == "admin":
+        elif current_page == "catalogo" and can_edit_catalog():
             render_catalog_editor_tab()
         elif current_page == "usuarios" and st.session_state.get("current_user") == "admin":
             render_user_management_tab()
@@ -4723,7 +4873,9 @@ def main() -> None:
             render_new_order_tab()
     else:
         # Create tabs based on user role (layout antigo)
-        if st.session_state.get("current_user") == "admin":
+        is_admin = st.session_state.get("current_user") == "admin"
+        catalog_access = can_edit_catalog()
+        if is_admin:
             tab_novo, tab_aguardando, tab_aprovados, tab_historico, tab_produtos, tab_catalogo, tab_usuarios = st.tabs([
                 "Novo Pedido",
                 "Aguardando Aprovação",
@@ -4733,14 +4885,22 @@ def main() -> None:
                 "✏️ Editar Catálogo",
                 "👥 Gerenciar Usuários"
             ])
+        elif catalog_access:
+            tab_novo, tab_aguardando, tab_aprovados, tab_historico, tab_catalogo = st.tabs([
+                "Novo Pedido",
+                "Aguardando Aprovação",
+                "📋 Pedidos Aprovados",
+                "📚 Histórico de Pedidos",
+                "✏️ Editar Catálogo",
+            ])
         else:
             tab_novo, tab_aguardando, tab_aprovados, tab_historico = st.tabs([
-                "Novo Pedido", 
-                "Aguardando Aprovação", 
+                "Novo Pedido",
+                "Aguardando Aprovação",
                 "📋 Pedidos Aprovados",
                 "📚 Histórico de Pedidos"
             ])
-        
+
         with tab_novo:
             render_new_order_tab()
         with tab_aguardando:
@@ -4749,14 +4909,17 @@ def main() -> None:
             render_approved_orders_tab()
         with tab_historico:
             render_history_tab()
-        
-        if st.session_state.get("current_user") == "admin":
+
+        if is_admin:
             with tab_produtos:
                 render_product_update_tab()
             with tab_catalogo:
                 render_catalog_editor_tab()
             with tab_usuarios:
                 render_user_management_tab()
+        elif catalog_access:
+            with tab_catalogo:
+                render_catalog_editor_tab()
 
     st.markdown('</div>', unsafe_allow_html=True)
 
