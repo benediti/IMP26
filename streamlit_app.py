@@ -3055,7 +3055,7 @@ def render_download_section() -> None:
 def render_aguardando_tab() -> None:
     current_user = st.session_state.get("current_user")
     user_info = get_user_info(current_user)
-    can_edit_aguardando = user_info.get("role") in {"admin", "user"}
+    can_edit_aguardando = user_info.get("role") in {"admin", "user", "catalog_editor"}
 
     if firestore_enabled():
         df = fetch_firestore_rows_raw("aguardando")
