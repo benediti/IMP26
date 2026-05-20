@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import time
 from datetime import date, datetime, timezone
 from typing import Dict, List, Optional
 
@@ -64,6 +65,8 @@ SESSION_DEFAULTS = {
     "product_update_changes": pd.DataFrame(),
     "product_update_df": pd.DataFrame(),
     "product_update_source": "manual",
+    "_admin_checked": False,
+    "_firestore_synced": False,
 }
 SHEET_CONFIG = {
     "Produtos": None,
@@ -96,13 +99,15 @@ SHEET_CONFIG = {
 def init_session_state() -> None:
     for key, value in SESSION_DEFAULTS.items():
         st.session_state.setdefault(key, value)
-    
-    # Ensure admin user exists on first run
-    ensure_admin_user()
-    
-    # Auto-load from Firestore on first run
-    if st.session_state.excel_data is None and firestore_enabled():
+
+    # Run once per session — not on every Streamlit rerun
+    if not st.session_state._admin_checked:
+        ensure_admin_user()
+        st.session_state._admin_checked = True
+
+    if not st.session_state._firestore_synced and firestore_enabled():
         sync_firestore_to_session()
+        st.session_state._firestore_synced = True
 
 
 def check_authentication() -> bool:
@@ -575,10 +580,22 @@ def fetch_firestore_rows(status: Optional[str] = None) -> pd.DataFrame:
         query = query.where("status", "==", status)
 
     rows = []
-    for doc in query.stream():
-        data = doc.to_dict()
-        data["__doc_id"] = doc.id
-        rows.append(data)
+    for attempt in range(3):
+        try:
+            rows = []
+            for doc in query.stream():
+                data = doc.to_dict()
+                data["__doc_id"] = doc.id
+                rows.append(data)
+            break
+        except Exception as e:
+            if "429" in str(e) or "Quota" in str(e) or "ResourceExhausted" in str(e):
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
+                    continue
+                st.warning("⚠️ Cota do Firestore excedida. Tente novamente em alguns instantes.")
+                return pd.DataFrame()
+            raise
 
     if not rows:
         return pd.DataFrame()
