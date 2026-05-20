@@ -106,8 +106,8 @@ def init_session_state() -> None:
         st.session_state._admin_checked = True
 
     if not st.session_state._firestore_synced and firestore_enabled():
+        st.session_state._firestore_synced = True  # mark before sync so crashes don't retry infinitely
         sync_firestore_to_session()
-        st.session_state._firestore_synced = True
 
 
 def check_authentication() -> bool:
@@ -870,10 +870,22 @@ def fetch_collection_df(collection: str, columns: List[str]) -> pd.DataFrame:
         return pd.DataFrame(columns=columns)
 
     rows = []
-    for doc in db.collection(collection).stream():
-        data = doc.to_dict()
-        data["__doc_id"] = doc.id
-        rows.append(data)
+    for attempt in range(3):
+        try:
+            rows = []
+            for doc in db.collection(collection).stream():
+                data = doc.to_dict()
+                data["__doc_id"] = doc.id
+                rows.append(data)
+            break
+        except Exception as e:
+            if "429" in str(e) or "Quota" in str(e) or "ResourceExhausted" in str(e):
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
+                    continue
+                st.warning("⚠️ Cota do Firestore excedida. Tente novamente em alguns instantes.")
+                return pd.DataFrame(columns=columns)
+            raise
 
     if not rows:
         return pd.DataFrame(columns=columns)
