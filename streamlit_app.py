@@ -2822,6 +2822,90 @@ def move_approved_to_history(order_docs: List) -> int:
         return 0
 
 
+def move_approved_to_history_by_doc_ids(doc_ids: List[str]) -> int:
+    """Move apenas os documentos da coleção pedido_itens cujos IDs estão em doc_ids para o histórico.
+    Agrupa por order_number, cria um registro por pedido e deleta os itens originais."""
+    try:
+        db = get_firestore_client()
+        order_groups: Dict[str, List] = {}
+
+        for doc_id in doc_ids:
+            doc = db.collection(FIRESTORE_COLLECTION).document(doc_id).get()
+            if not doc.exists:
+                continue
+            order_data = doc.to_dict()
+            order_key = str(order_data.get("order_number") or doc.id)
+            if order_key not in order_groups:
+                order_groups[order_key] = []
+            order_groups[order_key].append((doc.id, order_data))
+
+        moved_count = 0
+        for order_number, items_list in order_groups.items():
+            export_date = datetime.now(timezone.utc)
+
+            items_data = [
+                {
+                    "CódProImpakto": d.get("CódProImpakto"),
+                    "Item": d.get("Item"),
+                    "Qtde": d.get("Qtde"),
+                    "$ Unitário": d.get("$ Unitário"),
+                    "$ Total": d.get("$ Total"),
+                    "Unidade": d.get("Unidade"),
+                }
+                for _, d in items_list
+            ]
+
+            audit_entries = []
+            for doc_id, _ in items_list:
+                try:
+                    for audit_doc in (
+                        db.collection(FIRESTORE_AUDIT_COLLECTION)
+                        .where("doc_id", "==", doc_id)
+                        .where("action", "in", ["item_added", "item_removed", "quantity_changed"])
+                        .stream()
+                    ):
+                        ad = audit_doc.to_dict()
+                        audit_entries.append({"action": ad.get("action"), "timestamp": ad.get("timestamp"), "details": ad.get("details", {})})
+                except Exception:
+                    pass
+
+            first_item = items_list[0][1] if items_list else {}
+            history_record = {
+                "order_number": order_number,
+                "Setor": first_item.get("Setor", "Unknown"),
+                "client_name": first_item.get("SETOR2") or first_item.get("client_name"),
+                "$ Total": sum(i.get("$ Total") or 0 for i in items_data),
+                "created_at": first_item.get("created_at"),
+                "approved_at": first_item.get("approved_at"),
+                "approved_by": first_item.get("approved_by"),
+                "export_date": export_date,
+                "items": items_data,
+                "audit_trail": audit_entries,
+                "item_count": len(items_data),
+            }
+            db.collection("historico_pedidos").add(history_record)
+
+            batch = db.batch()
+            op_count = 0
+            for doc_id, _ in items_list:
+                batch.delete(db.collection(FIRESTORE_COLLECTION).document(doc_id))
+                op_count += 1
+                if op_count >= 450:
+                    batch.commit()
+                    batch = db.batch()
+                    op_count = 0
+            if op_count:
+                batch.commit()
+
+            moved_count += 1
+
+        return moved_count
+
+    except Exception as e:
+        st.error(f"❌ Erro ao mover pedidos para histórico: {e}")
+        return 0
+
+
 def repair_approved_orders_safe(order_docs: List, apply_changes: bool = False) -> Dict[str, object]:
     """Safely repair legacy approved items grouping.
 
@@ -3778,148 +3862,201 @@ def render_new_order_tab() -> None:
 
 
 def render_approved_orders_tab() -> None:
-    """Exibe pedidos aprovados agrupados por número de pedido."""
-    st.subheader("📋 Pedidos Aprovados - Histórico")
-    
+    """Exibe pedidos aprovados agrupados por número de pedido, com filtro por mês."""
+    st.subheader("📋 Pedidos Aprovados")
+
     try:
         db = get_firestore_client()
-        
-        # Fetch approved orders
+
         try:
-            approved_orders = db.collection(FIRESTORE_COLLECTION)\
+            approved_stream = db.collection(FIRESTORE_COLLECTION)\
                 .where("status", "==", "pedido")\
                 .order_by("approved_at", direction=firestore.Query.DESCENDING)\
                 .stream()
-
             orders_list = []
-            for doc in approved_orders:
+            for doc in approved_stream:
                 order_data = doc.to_dict()
                 order_data["__doc_id"] = doc.id
                 orders_list.append(order_data)
-        except Exception as exc:
-            st.warning(
-                "⚠️ Índice não encontrado no Firestore. "
-                "Carregando sem ordenação (fallback local)."
-            )
-            approved_orders = db.collection(FIRESTORE_COLLECTION)\
-                .where("status", "==", "pedido")\
-                .stream()
-
+        except Exception:
+            st.warning("⚠️ Índice não encontrado no Firestore. Carregando sem ordenação (fallback local).")
             orders_list = []
-            for doc in approved_orders:
+            for doc in db.collection(FIRESTORE_COLLECTION).where("status", "==", "pedido").stream():
                 order_data = doc.to_dict()
                 order_data["__doc_id"] = doc.id
                 orders_list.append(order_data)
 
-            def sort_key(item: Dict) -> datetime:
-                value = item.get("approved_at")
-                if hasattr(value, "to_datetime"):
-                    return value.to_datetime()
-                if isinstance(value, datetime):
-                    return value
-                return datetime.min
+            def _sort_approved(item: Dict) -> datetime:
+                v = item.get("approved_at")
+                if hasattr(v, "to_datetime"):
+                    return v.to_datetime()
+                return v if isinstance(v, datetime) else datetime.min
 
-            orders_list.sort(key=sort_key, reverse=True)
-        
+            orders_list.sort(key=_sort_approved, reverse=True)
+
         if not orders_list:
             st.info("ℹ️ Nenhum pedido aprovado ainda.")
             return
-        
-        # Convert to DataFrame and group by order_number
+
         orders_df = pd.DataFrame(orders_list)
-        
-        # For orders without order_number (legacy), use __doc_id as fallback
+
         if "order_number" not in orders_df.columns:
             orders_df["order_number"] = orders_df["__doc_id"]
         else:
             orders_df["order_number"] = orders_df["order_number"].fillna(orders_df["__doc_id"])
-        
-        # Group by client first
-        grouped_by_client = orders_df.groupby("SETOR2")
-        
-        st.write(f"**Total: {len(grouped_by_client)} cliente(s) com {len(orders_df.groupby('order_number'))} pedido(s)**")
+
+        # Derive year-month label from approved_at
+        orders_df["__approved_dt"] = orders_df["approved_at"].apply(coerce_datetime)
+        orders_df["__year_month"] = orders_df["__approved_dt"].apply(
+            lambda dt: dt.strftime("%Y-%m") if isinstance(dt, datetime) else "sem-data"
+        )
+
+        # Build month options (newest first) with human-readable labels
+        month_options = sorted(orders_df["__year_month"].unique().tolist(), reverse=True)
+
+        def _month_label(ym: str) -> str:
+            if ym == "sem-data":
+                return "Sem data"
+            try:
+                meses = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"]
+                ano, mes = ym.split("-")
+                return f"{meses[int(mes) - 1]}/{ano}"
+            except Exception:
+                return ym
+
+        # ── Filtro de mês ──────────────────────────────────────────────
+        col_filter, col_stats = st.columns([2, 2])
+        with col_filter:
+            selected_month = st.selectbox(
+                "📅 Mês de aprovação",
+                options=month_options,
+                format_func=_month_label,
+                key="approved_month_filter",
+            )
+
+        filtered_df = orders_df[orders_df["__year_month"] == selected_month].copy()
+        n_orders = len(filtered_df.groupby("order_number"))
+        n_clients = filtered_df["SETOR2"].nunique() if "SETOR2" in filtered_df.columns else 0
+
+        with col_stats:
+            st.metric(
+                f"Pedidos em {_month_label(selected_month)}",
+                f"{n_orders} pedido(s) · {n_clients} cliente(s)",
+            )
+
+        # ── Ações do mês filtrado ──────────────────────────────────────
+        col_export, col_move = st.columns(2)
+
+        with col_export:
+            export_cols = ["CòdClienteImpakto", "CódProImpakto", "Item", "Qtde", "$ Unitário", "$ Total", "Unidade", "Setor", "SETOR2"]
+            available_cols = [c for c in export_cols if c in filtered_df.columns]
+            csv_bytes = filtered_df[available_cols].to_csv(index=False, sep=";").encode("utf-8-sig")
+            st.download_button(
+                f"📥 Exportar {_month_label(selected_month)} (CSV)",
+                data=csv_bytes,
+                file_name=f"pedidos_{selected_month}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+        with col_move:
+            if st.session_state.get("current_user") == "admin":
+                confirm_move = st.checkbox(
+                    f"Confirmar mover {_month_label(selected_month)} → Histórico",
+                    key=f"confirm_move_{selected_month}",
+                )
+                if st.button(
+                    f"📚 Mover {_month_label(selected_month)} → Histórico",
+                    use_container_width=True,
+                    disabled=not confirm_move,
+                    key=f"btn_move_{selected_month}",
+                ):
+                    doc_ids = filtered_df["__doc_id"].tolist()
+                    with st.spinner(f"Movendo pedidos de {_month_label(selected_month)} para histórico..."):
+                        moved = move_approved_to_history_by_doc_ids(doc_ids)
+                    if moved > 0:
+                        st.success(f"✅ {moved} pedido(s) de {_month_label(selected_month)} movido(s) para histórico!")
+                        sync_firestore_to_session()
+                        st.rerun()
+                    else:
+                        st.warning("Nenhum pedido movido.")
+
         st.divider()
-        
+
+        # ── Lista de pedidos do mês selecionado ───────────────────────
+        if "SETOR2" not in filtered_df.columns or filtered_df.empty:
+            st.info("Nenhum pedido para o mês selecionado.")
+            return
+
+        grouped_by_client = filtered_df.groupby("SETOR2")
+        st.write(f"**{_month_label(selected_month)}: {n_clients} cliente(s) com {n_orders} pedido(s)**")
+        st.divider()
+
         for client, client_df in grouped_by_client:
             with st.container(border=True):
-                # Group by order_number within each client
                 grouped_by_order = client_df.groupby("order_number")
-                
+
                 col1, col2, col3 = st.columns([2, 1, 1])
                 col1.markdown(f"### 🏢 {client}")
                 col2.metric("Pedidos", len(grouped_by_order))
                 col3.metric("Total", f"R$ {client_df['$ Total'].sum():.2f}")
-                
+
                 st.divider()
-                
-                # Display each order (grouped by order_number)
+
                 for order_num, order_items in grouped_by_order:
-                    # Get order info from first item
                     first_item = order_items.iloc[0]
-                    approved_at = first_item.get('approved_at', 'N/A')
-                    if hasattr(approved_at, 'to_datetime'):
-                        approved_at = approved_at.to_datetime().strftime('%Y-%m-%d %H:%M:%S')
-                    approved_by = first_item.get('approved_by', 'unknown')
-                    created_at = first_item.get('created_at', 'N/A')
-                    if hasattr(created_at, 'to_datetime'):
-                        created_at = created_at.to_datetime().strftime('%Y-%m-%d %H:%M:%S')
-                    
-                    order_total = order_items['$ Total'].sum()
+                    approved_at = first_item.get("approved_at", "N/A")
+                    if hasattr(approved_at, "to_datetime"):
+                        approved_at = approved_at.to_datetime().strftime("%Y-%m-%d %H:%M:%S")
+                    approved_by = first_item.get("approved_by", "unknown")
+                    created_at = first_item.get("created_at", "N/A")
+                    if hasattr(created_at, "to_datetime"):
+                        created_at = created_at.to_datetime().strftime("%Y-%m-%d %H:%M:%S")
+
+                    order_total = order_items["$ Total"].sum()
                     items_count = len(order_items)
-                    
+
                     with st.expander(f"📦 Pedido #{order_num} - {items_count} item(ns) - R$ {order_total:.2f}"):
                         col_info, col_user = st.columns([3, 1])
-                        
                         with col_info:
                             st.write("**Informações:**")
                             st.write(f"- 📅 Criado em: {created_at}")
                             st.write(f"- ✅ Aprovado em: {approved_at}")
                             st.write(f"- 📦 Itens: {items_count}")
                             st.write(f"- 💰 Total: R$ {order_total:.2f}")
-                        
                         with col_user:
                             st.write("**Aprovado por:**")
                             st.write(f"👤 {approved_by}")
-                        
+
                         st.divider()
-                        
-                        # Display items table
                         st.write("**Itens do Pedido:**")
-                        items_display = order_items[[
-                            "CódProImpakto",
-                            "Item",
-                            "Qtde", 
-                            "$ Unitário",
-                            "$ Total",
-                            "Unidade"
-                        ]].copy()
-                        items_display.columns = ["📦 Código", "📝 Produto", "🔢 Qtde", "💵 Unit.", "💰 Total", "📐 Un."]
+                        avail = [c for c in ["CódProImpakto", "Item", "Qtde", "$ Unitário", "$ Total", "Unidade"] if c in order_items.columns]
+                        items_display = order_items[avail].copy()
+                        items_display.columns = ["📦 Código", "📝 Produto", "🔢 Qtde", "💵 Unit.", "💰 Total", "📐 Un."][:len(avail)]
                         st.dataframe(items_display, use_container_width=True, hide_index=True)
-                        
-                        # Admin delete button
+
                         if st.session_state.get("current_user") == "admin":
                             st.divider()
-                            col_delete = st.columns([1, 3])
-                            with col_delete[0]:
-                                confirm_key = f"confirm_delete_order_{order_num}"
-                                confirmed = st.checkbox("Confirmar exclusão", key=confirm_key)
+                            col_del = st.columns([1, 3])
+                            with col_del[0]:
+                                confirmed = st.checkbox("Confirmar exclusão", key=f"confirm_delete_order_{order_num}")
                                 if st.button(
                                     "🗑️ Deletar Pedido",
                                     key=f"delete_order_{order_num}",
                                     help="Somente admin - deleta todos os itens deste pedido",
                                     disabled=not confirmed,
                                 ):
-                                    # Delete all items with this order_number
                                     for doc_id in order_items["__doc_id"]:
                                         db.collection(FIRESTORE_COLLECTION).document(doc_id).delete()
                                     st.success(f"✅ Pedido #{order_num} deletado com sucesso!")
                                     sync_firestore_to_session()
                                     st.rerun()
-                
-                st.write("")  # Spacing
-    
+
+                st.write("")
+
     except Exception as e:
         st.error(f"❌ Erro ao carregar pedidos aprovados: {e}")
+
 
 
 def render_history_tab() -> None:
