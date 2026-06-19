@@ -2176,6 +2176,210 @@ def persist_cart(destino: str) -> None:
     )
 
 
+def generate_approved_orders_pdf(orders_df: pd.DataFrame, month_label: str) -> io.BytesIO:
+    """Gera PDF do relatório de pedidos aprovados agrupado por cliente."""
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4, leftMargin=36, rightMargin=36, topMargin=36, bottomMargin=36)
+    styles = getSampleStyleSheet()
+    elements = []
+
+    title_style = ParagraphStyle("TitAp", parent=styles["Heading1"], fontSize=15, alignment=TA_CENTER, textColor=colors.HexColor("#1a1a1a"))
+    subtitle_style = ParagraphStyle("SubAp", parent=styles["Normal"], fontSize=10, alignment=TA_CENTER, textColor=colors.HexColor("#555555"))
+    client_style = ParagraphStyle("CliAp", parent=styles["Heading2"], fontSize=12, textColor=colors.HexColor("#1E3A8A"), spaceBefore=10, spaceAfter=4)
+    cell_style = ParagraphStyle("CellAp", parent=styles["Normal"], fontSize=8, leading=10)
+
+    elements.append(Paragraph("<b>RELATÓRIO DE PEDIDOS APROVADOS — IMPAKTO</b>", title_style))
+    elements.append(Paragraph(f"Período: {month_label}  |  Gerado em: {datetime.now().strftime('%d/%m/%Y %H:%M')}", subtitle_style))
+    elements.append(Spacer(1, 10))
+
+    # Totalizador geral
+    grand_total = orders_df["$ Total"].sum() if "$ Total" in orders_df.columns else 0.0
+    n_clients = orders_df["SETOR2"].nunique() if "SETOR2" in orders_df.columns else 0
+    n_items = len(orders_df)
+    summary_data = [
+        ["Total de clientes", str(n_clients)],
+        ["Total de itens", str(n_items)],
+        ["Valor total geral", format_currency(round(grand_total, 2))],
+    ]
+    summary_table = Table(summary_data, colWidths=[5 * 28.35, 4 * 28.35])
+    summary_table.setStyle(TableStyle([
+        ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
+        ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+        ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#cccccc")),
+        ("ROWBACKGROUNDS", (0, 0), (-1, -1), [colors.HexColor("#EEF2FF"), colors.white]),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    elements.append(summary_table)
+    elements.append(Spacer(1, 14))
+
+    # Por cliente
+    grouped = orders_df.groupby("SETOR2") if "SETOR2" in orders_df.columns else []
+    for client, client_df in grouped:
+        client_total = round(client_df["$ Total"].sum(), 2) if "$ Total" in client_df.columns else 0.0
+        client_items = len(client_df)
+        elements.append(Paragraph(f"🏢 {client}", client_style))
+
+        info_row = Table(
+            [[f"Itens: {client_items}", f"Total: {format_currency(client_total)}"]],
+            colWidths=[7 * 28.35, 6 * 28.35],
+        )
+        info_row.setStyle(TableStyle([
+            ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
+            ("FONTSIZE", (0, 0), (-1, -1), 9),
+            ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+            ("TEXTCOLOR", (0, 0), (-1, -1), colors.HexColor("#374151")),
+        ]))
+        elements.append(info_row)
+        elements.append(Spacer(1, 4))
+
+        # Tabela de itens do cliente
+        header = [
+            Paragraph("<b>Código</b>", cell_style),
+            Paragraph("<b>Produto</b>", cell_style),
+            Paragraph("<b>Qtde</b>", cell_style),
+            Paragraph("<b>Unit.</b>", cell_style),
+            Paragraph("<b>Total</b>", cell_style),
+        ]
+        rows = [header]
+        for _, row in client_df.iterrows():
+            rows.append([
+                Paragraph(str(row.get("CódProImpakto", "")), cell_style),
+                Paragraph(str(row.get("Item", "")), cell_style),
+                Paragraph(str(int(parse_float(row.get("Qtde", 0)))), cell_style),
+                Paragraph(format_currency(round(parse_float(row.get("$ Unitário", 0)), 2)), cell_style),
+                Paragraph(format_currency(round(parse_float(row.get("$ Total", 0)), 2)), cell_style),
+            ])
+        rows.append([
+            Paragraph("", cell_style), Paragraph("<b>TOTAL</b>", cell_style),
+            Paragraph("", cell_style), Paragraph("", cell_style),
+            Paragraph(f"<b>{format_currency(client_total)}</b>", cell_style),
+        ])
+
+        items_table = Table(rows, colWidths=[1.8 * 28.35, 6.2 * 28.35, 1.2 * 28.35, 2.0 * 28.35, 2.0 * 28.35])
+        items_table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1E3A8A")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("ALIGN", (2, 0), (-1, -1), "RIGHT"),
+            ("GRID", (0, 0), (-1, -2), 0.25, colors.HexColor("#dddddd")),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -2), [colors.white, colors.HexColor("#F8FAFC")]),
+            ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+            ("LINEABOVE", (0, -1), (-1, -1), 1.0, colors.HexColor("#1E3A8A")),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ]))
+        elements.append(items_table)
+        elements.append(Spacer(1, 12))
+
+    doc.build(elements)
+    buffer.seek(0)
+    return buffer
+
+
+def generate_approved_orders_excel(orders_df: pd.DataFrame, month_label: str) -> io.BytesIO:
+    """Gera Excel do relatório de pedidos aprovados: aba resumo + aba detalhada."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    wb = Workbook()
+
+    # ── Aba 1: Resumo por cliente ──────────────────────────────────
+    ws_summary = wb.active
+    ws_summary.title = "Resumo por Cliente"
+
+    header_fill = PatternFill("solid", fgColor="1E3A8A")
+    header_font = Font(color="FFFFFF", bold=True, size=10)
+    alt_fill = PatternFill("solid", fgColor="F0F4FF")
+    bold_font = Font(bold=True)
+    thin = Side(style="thin", color="CCCCCC")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    ws_summary.append([f"Relatório de Pedidos Aprovados — {month_label}"])
+    ws_summary["A1"].font = Font(bold=True, size=13)
+    ws_summary.merge_cells("A1:E1")
+    ws_summary.append([])
+
+    summary_headers = ["Cliente", "Qtde Pedidos", "Qtde Itens", "Valor Total"]
+    ws_summary.append(summary_headers)
+    for col_idx, h in enumerate(summary_headers, 1):
+        cell = ws_summary.cell(row=3, column=col_idx)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center")
+        cell.border = border
+
+    grand_total = 0.0
+    row_idx = 4
+    if "SETOR2" in orders_df.columns:
+        for client, client_df in orders_df.groupby("SETOR2"):
+            n_orders = client_df["order_number"].nunique() if "order_number" in client_df.columns else 1
+            n_items = len(client_df)
+            total = round(client_df["$ Total"].sum(), 2) if "$ Total" in client_df.columns else 0.0
+            grand_total += total
+            ws_summary.append([client, n_orders, n_items, total])
+            fill = alt_fill if row_idx % 2 == 0 else PatternFill("solid", fgColor="FFFFFF")
+            for col_idx in range(1, 5):
+                cell = ws_summary.cell(row=row_idx, column=col_idx)
+                cell.fill = fill
+                cell.border = border
+                if col_idx == 4:
+                    cell.number_format = '#,##0.00'
+                    cell.alignment = Alignment(horizontal="right")
+            row_idx += 1
+
+    ws_summary.append(["TOTAL GERAL", "", "", round(grand_total, 2)])
+    for col_idx in range(1, 5):
+        cell = ws_summary.cell(row=row_idx, column=col_idx)
+        cell.font = bold_font
+        cell.fill = PatternFill("solid", fgColor="DBEAFE")
+        cell.border = border
+        if col_idx == 4:
+            cell.number_format = '#,##0.00'
+
+    ws_summary.column_dimensions["A"].width = 40
+    ws_summary.column_dimensions["B"].width = 14
+    ws_summary.column_dimensions["C"].width = 12
+    ws_summary.column_dimensions["D"].width = 16
+
+    # ── Aba 2: Itens detalhados ────────────────────────────────────
+    ws_detail = wb.create_sheet("Itens Detalhados")
+    detail_headers = ["CòdClienteImpakto", "CódProImpakto", "Item", "Qtde", "$ Unitário", "$ Total", "Unidade", "Setor", "SETOR2"]
+    ws_detail.append(detail_headers)
+    for col_idx, h in enumerate(detail_headers, 1):
+        cell = ws_detail.cell(row=1, column=col_idx)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center")
+        cell.border = border
+
+    avail_cols = [c for c in detail_headers if c in orders_df.columns]
+    for r_idx, (_, row) in enumerate(orders_df[avail_cols].iterrows(), start=2):
+        for c_idx, col in enumerate(avail_cols, start=1):
+            val = row[col]
+            if col in ("$ Unitário", "$ Total"):
+                val = round(parse_float(val), 2)
+            ws_detail.cell(row=r_idx, column=c_idx, value=val)
+            if col in ("$ Unitário", "$ Total"):
+                ws_detail.cell(row=r_idx, column=c_idx).number_format = '#,##0.00'
+            fill = alt_fill if r_idx % 2 == 0 else PatternFill("solid", fgColor="FFFFFF")
+            ws_detail.cell(row=r_idx, column=c_idx).fill = fill
+            ws_detail.cell(row=r_idx, column=c_idx).border = border
+
+    col_widths = [18, 14, 40, 8, 12, 12, 10, 8, 35]
+    for i, w in enumerate(col_widths, 1):
+        ws_detail.column_dimensions[get_column_letter(i)].width = w
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+    return buffer
+
+
 def generate_previa_pdf() -> Optional[io.BytesIO]:
     cart = st.session_state.cart
     setor = st.session_state.selected_setor
@@ -3945,22 +4149,47 @@ def render_approved_orders_tab() -> None:
             )
 
         # ── Ações do mês filtrado ──────────────────────────────────────
-        col_export, col_move = st.columns(2)
+        col_csv, col_pdf, col_excel, col_move = st.columns(4)
 
-        with col_export:
-            export_cols = ["CòdClienteImpakto", "CódProImpakto", "Item", "Qtde", "$ Unitário", "$ Total", "Unidade", "Setor", "SETOR2"]
-            available_cols = [c for c in export_cols if c in filtered_df.columns]
-            export_df = filtered_df[available_cols].copy()
-            for col in ["$ Unitário", "$ Total"]:
-                if col in export_df.columns:
-                    export_df[col] = pd.to_numeric(export_df[col], errors="coerce").round(2)
+        # Prepara df de exportação (valores arredondados)
+        export_cols = ["CòdClienteImpakto", "CódProImpakto", "Item", "Qtde", "$ Unitário", "$ Total", "Unidade", "Setor", "SETOR2"]
+        available_cols = [c for c in export_cols if c in filtered_df.columns]
+        export_df = filtered_df[available_cols].copy()
+        for col in ["$ Unitário", "$ Total"]:
+            if col in export_df.columns:
+                export_df[col] = pd.to_numeric(export_df[col], errors="coerce").round(2)
+
+        with col_csv:
             csv_bytes = export_df.to_csv(index=False, sep=";").encode("utf-8-sig")
             st.download_button(
-                f"📥 Exportar {_month_label(selected_month)} (CSV)",
+                f"📥 CSV",
                 data=csv_bytes,
                 file_name=f"pedidos_{selected_month}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                 mime="text/csv",
                 use_container_width=True,
+                help="Exportar itens em CSV (formato Impakto)",
+            )
+
+        with col_pdf:
+            pdf_buffer = generate_approved_orders_pdf(filtered_df, _month_label(selected_month))
+            st.download_button(
+                f"📄 PDF",
+                data=pdf_buffer,
+                file_name=f"relatorio_{selected_month}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+                help="Relatório PDF por cliente com totais",
+            )
+
+        with col_excel:
+            excel_buffer = generate_approved_orders_excel(filtered_df, _month_label(selected_month))
+            st.download_button(
+                f"📊 Excel",
+                data=excel_buffer,
+                file_name=f"relatorio_{selected_month}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                help="Planilha Excel: resumo por cliente + itens detalhados",
             )
 
         with col_move:
