@@ -902,9 +902,12 @@ def fetch_products_df() -> pd.DataFrame:
     return fetch_collection_df(FIRESTORE_PRODUCTS_COLLECTION, columns)
 
 
+SUPERVISORAS = ["", "Edinalva", "Conceição", "Equippe"]
+
+
 @st.cache_data(show_spinner=False, ttl=600)
 def fetch_setores_df() -> pd.DataFrame:
-    columns = ["CódUnidade", "items__description"]
+    columns = ["CódUnidade", "items__description", "supervisora"]
     return fetch_collection_df(FIRESTORE_SETORES_COLLECTION, columns)
 
 
@@ -2176,8 +2179,61 @@ def persist_cart(destino: str) -> None:
     )
 
 
-def generate_approved_orders_pdf(orders_df: pd.DataFrame, month_label: str) -> io.BytesIO:
-    """Gera PDF do relatório de pedidos aprovados agrupado por cliente."""
+def _pdf_client_block(elements: list, client: str, client_df: pd.DataFrame, cell_style, supervisora: str = "") -> None:
+    """Adiciona bloco de um cliente no PDF de aprovados."""
+    from reportlab.platypus import Paragraph, Spacer, Table
+    from reportlab.lib import colors
+    from reportlab.lib.styles import ParagraphStyle
+
+    client_style = ParagraphStyle("CliAp2", fontSize=11, fontName="Helvetica-Bold", textColor=colors.HexColor("#1E3A8A"), spaceBefore=8, spaceAfter=3)
+    client_total = round(client_df["$ Total"].sum(), 2) if "$ Total" in client_df.columns else 0.0
+    sup_label = f"  —  Supervisora: {supervisora}" if supervisora else ""
+    elements.append(Paragraph(f"{client}{sup_label}", client_style))
+
+    info_row = Table([[f"Itens: {len(client_df)}", f"Total: {format_currency(client_total)}"]], colWidths=[7 * 28.35, 6 * 28.35])
+    info_row.setStyle(TableStyle([
+        ("FONTNAME", (0, 0), (-1, -1), "Helvetica"), ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("ALIGN", (1, 0), (1, -1), "RIGHT"), ("TEXTCOLOR", (0, 0), (-1, -1), colors.HexColor("#374151")),
+    ]))
+    elements.append(info_row)
+    elements.append(Spacer(1, 3))
+
+    rows = [[
+        Paragraph("<b>Código</b>", cell_style), Paragraph("<b>Produto</b>", cell_style),
+        Paragraph("<b>Qtde</b>", cell_style), Paragraph("<b>Unit.</b>", cell_style),
+        Paragraph("<b>Total</b>", cell_style),
+    ]]
+    for _, row in client_df.iterrows():
+        rows.append([
+            Paragraph(str(row.get("CódProImpakto", "")), cell_style),
+            Paragraph(str(row.get("Item", "")), cell_style),
+            Paragraph(str(int(parse_float(row.get("Qtde", 0)))), cell_style),
+            Paragraph(format_currency(round(parse_float(row.get("$ Unitário", 0)), 2)), cell_style),
+            Paragraph(format_currency(round(parse_float(row.get("$ Total", 0)), 2)), cell_style),
+        ])
+    rows.append([Paragraph("", cell_style), Paragraph("<b>TOTAL</b>", cell_style),
+                 Paragraph("", cell_style), Paragraph("", cell_style),
+                 Paragraph(f"<b>{format_currency(client_total)}</b>", cell_style)])
+
+    tbl = Table(rows, colWidths=[1.8 * 28.35, 6.2 * 28.35, 1.2 * 28.35, 2.0 * 28.35, 2.0 * 28.35])
+    tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1E3A8A")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("ALIGN", (2, 0), (-1, -1), "RIGHT"),
+        ("GRID", (0, 0), (-1, -2), 0.25, colors.HexColor("#dddddd")),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -2), [colors.white, colors.HexColor("#F8FAFC")]),
+        ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+        ("LINEABOVE", (0, -1), (-1, -1), 1.0, colors.HexColor("#1E3A8A")),
+        ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]))
+    elements.append(tbl)
+    elements.append(Spacer(1, 10))
+
+
+def generate_approved_orders_pdf(orders_df: pd.DataFrame, month_label: str, group_by_supervisora: bool = False) -> io.BytesIO:
+    """Gera PDF do relatório de pedidos aprovados agrupado por cliente (e opcionalmente por supervisora)."""
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4, leftMargin=36, rightMargin=36, topMargin=36, bottomMargin=36)
     styles = getSampleStyleSheet()
@@ -2185,102 +2241,58 @@ def generate_approved_orders_pdf(orders_df: pd.DataFrame, month_label: str) -> i
 
     title_style = ParagraphStyle("TitAp", parent=styles["Heading1"], fontSize=15, alignment=TA_CENTER, textColor=colors.HexColor("#1a1a1a"))
     subtitle_style = ParagraphStyle("SubAp", parent=styles["Normal"], fontSize=10, alignment=TA_CENTER, textColor=colors.HexColor("#555555"))
-    client_style = ParagraphStyle("CliAp", parent=styles["Heading2"], fontSize=12, textColor=colors.HexColor("#1E3A8A"), spaceBefore=10, spaceAfter=4)
     cell_style = ParagraphStyle("CellAp", parent=styles["Normal"], fontSize=8, leading=10)
+    sup_section_style = ParagraphStyle("SupSec", parent=styles["Heading2"], fontSize=13, textColor=colors.HexColor("#7C3AED"), spaceBefore=14, spaceAfter=4)
 
     elements.append(Paragraph("<b>RELATÓRIO DE PEDIDOS APROVADOS — IMPAKTO</b>", title_style))
-    elements.append(Paragraph(f"Período: {month_label}  |  Gerado em: {datetime.now().strftime('%d/%m/%Y %H:%M')}", subtitle_style))
+    subtitle = f"Período: {month_label}  |  Gerado em: {datetime.now().strftime('%d/%m/%Y %H:%M')}"
+    if group_by_supervisora and "supervisora" in orders_df.columns:
+        subtitle += "  |  Agrupado por Supervisora"
+    elements.append(Paragraph(subtitle, subtitle_style))
     elements.append(Spacer(1, 10))
 
-    # Totalizador geral
     grand_total = orders_df["$ Total"].sum() if "$ Total" in orders_df.columns else 0.0
     n_clients = orders_df["SETOR2"].nunique() if "SETOR2" in orders_df.columns else 0
-    n_items = len(orders_df)
     summary_data = [
         ["Total de clientes", str(n_clients)],
-        ["Total de itens", str(n_items)],
+        ["Total de itens", str(len(orders_df))],
         ["Valor total geral", format_currency(round(grand_total, 2))],
     ]
     summary_table = Table(summary_data, colWidths=[5 * 28.35, 4 * 28.35])
     summary_table.setStyle(TableStyle([
-        ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
-        ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
-        ("FONTSIZE", (0, 0), (-1, -1), 9),
-        ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+        ("FONTNAME", (0, 0), (-1, -1), "Helvetica"), ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 9), ("ALIGN", (1, 0), (1, -1), "RIGHT"),
         ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#cccccc")),
         ("ROWBACKGROUNDS", (0, 0), (-1, -1), [colors.HexColor("#EEF2FF"), colors.white]),
-        ("TOPPADDING", (0, 0), (-1, -1), 4),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 4), ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
     ]))
     elements.append(summary_table)
     elements.append(Spacer(1, 14))
 
-    # Por cliente
-    grouped = orders_df.groupby("SETOR2") if "SETOR2" in orders_df.columns else []
-    for client, client_df in grouped:
-        client_total = round(client_df["$ Total"].sum(), 2) if "$ Total" in client_df.columns else 0.0
-        client_items = len(client_df)
-        elements.append(Paragraph(f"🏢 {client}", client_style))
+    has_supervisora = group_by_supervisora and "supervisora" in orders_df.columns and orders_df["supervisora"].notna().any()
 
-        info_row = Table(
-            [[f"Itens: {client_items}", f"Total: {format_currency(client_total)}"]],
-            colWidths=[7 * 28.35, 6 * 28.35],
-        )
-        info_row.setStyle(TableStyle([
-            ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
-            ("FONTSIZE", (0, 0), (-1, -1), 9),
-            ("ALIGN", (1, 0), (1, -1), "RIGHT"),
-            ("TEXTCOLOR", (0, 0), (-1, -1), colors.HexColor("#374151")),
-        ]))
-        elements.append(info_row)
-        elements.append(Spacer(1, 4))
-
-        # Tabela de itens do cliente
-        header = [
-            Paragraph("<b>Código</b>", cell_style),
-            Paragraph("<b>Produto</b>", cell_style),
-            Paragraph("<b>Qtde</b>", cell_style),
-            Paragraph("<b>Unit.</b>", cell_style),
-            Paragraph("<b>Total</b>", cell_style),
-        ]
-        rows = [header]
-        for _, row in client_df.iterrows():
-            rows.append([
-                Paragraph(str(row.get("CódProImpakto", "")), cell_style),
-                Paragraph(str(row.get("Item", "")), cell_style),
-                Paragraph(str(int(parse_float(row.get("Qtde", 0)))), cell_style),
-                Paragraph(format_currency(round(parse_float(row.get("$ Unitário", 0)), 2)), cell_style),
-                Paragraph(format_currency(round(parse_float(row.get("$ Total", 0)), 2)), cell_style),
-            ])
-        rows.append([
-            Paragraph("", cell_style), Paragraph("<b>TOTAL</b>", cell_style),
-            Paragraph("", cell_style), Paragraph("", cell_style),
-            Paragraph(f"<b>{format_currency(client_total)}</b>", cell_style),
-        ])
-
-        items_table = Table(rows, colWidths=[1.8 * 28.35, 6.2 * 28.35, 1.2 * 28.35, 2.0 * 28.35, 2.0 * 28.35])
-        items_table.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1E3A8A")),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("FONTSIZE", (0, 0), (-1, -1), 8),
-            ("ALIGN", (2, 0), (-1, -1), "RIGHT"),
-            ("GRID", (0, 0), (-1, -2), 0.25, colors.HexColor("#dddddd")),
-            ("ROWBACKGROUNDS", (0, 1), (-1, -2), [colors.white, colors.HexColor("#F8FAFC")]),
-            ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
-            ("LINEABOVE", (0, -1), (-1, -1), 1.0, colors.HexColor("#1E3A8A")),
-            ("TOPPADDING", (0, 0), (-1, -1), 3),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-        ]))
-        elements.append(items_table)
-        elements.append(Spacer(1, 12))
+    if has_supervisora:
+        orders_df = orders_df.copy()
+        orders_df["supervisora"] = orders_df["supervisora"].fillna("Não atribuída").astype(str).str.strip()
+        orders_df["supervisora"] = orders_df["supervisora"].replace("", "Não atribuída")
+        for sup, sup_df in orders_df.groupby("supervisora"):
+            sup_total = round(sup_df["$ Total"].sum(), 2) if "$ Total" in sup_df.columns else 0.0
+            elements.append(Paragraph(f"Supervisora: {sup}  —  Total: {format_currency(sup_total)}", sup_section_style))
+            if "SETOR2" in sup_df.columns:
+                for client, client_df in sup_df.groupby("SETOR2"):
+                    _pdf_client_block(elements, client, client_df, cell_style)
+    else:
+        if "SETOR2" in orders_df.columns:
+            for client, client_df in orders_df.groupby("SETOR2"):
+                sup = str(client_df["supervisora"].iloc[0]) if "supervisora" in client_df.columns else ""
+                _pdf_client_block(elements, client, client_df, cell_style, supervisora=sup if sup and sup != "nan" else "")
 
     doc.build(elements)
     buffer.seek(0)
     return buffer
 
 
-def generate_approved_orders_excel(orders_df: pd.DataFrame, month_label: str) -> io.BytesIO:
+def generate_approved_orders_excel(orders_df: pd.DataFrame, month_label: str, group_by_supervisora: bool = False) -> io.BytesIO:
     """Gera Excel do relatório de pedidos aprovados: aba resumo + aba detalhada."""
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -2304,7 +2316,9 @@ def generate_approved_orders_excel(orders_df: pd.DataFrame, month_label: str) ->
     ws_summary.merge_cells("A1:E1")
     ws_summary.append([])
 
-    summary_headers = ["Cliente", "Qtde Pedidos", "Qtde Itens", "Valor Total"]
+    has_sup_col = group_by_supervisora and "supervisora" in orders_df.columns
+    summary_headers = ["Supervisora", "Cliente", "Qtde Pedidos", "Qtde Itens", "Valor Total"] if has_sup_col else ["Cliente", "Qtde Pedidos", "Qtde Itens", "Valor Total"]
+    n_sum_cols = len(summary_headers)
     ws_summary.append(summary_headers)
     for col_idx, h in enumerate(summary_headers, 1):
         cell = ws_summary.cell(row=3, column=col_idx)
@@ -2316,35 +2330,46 @@ def generate_approved_orders_excel(orders_df: pd.DataFrame, month_label: str) ->
     grand_total = 0.0
     row_idx = 4
     if "SETOR2" in orders_df.columns:
-        for client, client_df in orders_df.groupby("SETOR2"):
+        df_iter = orders_df.copy()
+        if has_sup_col:
+            df_iter["supervisora"] = df_iter["supervisora"].fillna("Não atribuída").astype(str).str.strip().replace("", "Não atribuída")
+            group_iter = df_iter.groupby(["supervisora", "SETOR2"])
+        else:
+            group_iter = [(("", client), cdf) for client, cdf in df_iter.groupby("SETOR2")]
+
+        for (sup, client), client_df in group_iter:
             n_orders = client_df["order_number"].nunique() if "order_number" in client_df.columns else 1
             n_items = len(client_df)
             total = round(client_df["$ Total"].sum(), 2) if "$ Total" in client_df.columns else 0.0
             grand_total += total
-            ws_summary.append([client, n_orders, n_items, total])
+            row_data = [sup, client, n_orders, n_items, total] if has_sup_col else [client, n_orders, n_items, total]
+            ws_summary.append(row_data)
             fill = alt_fill if row_idx % 2 == 0 else PatternFill("solid", fgColor="FFFFFF")
-            for col_idx in range(1, 5):
+            for col_idx in range(1, n_sum_cols + 1):
                 cell = ws_summary.cell(row=row_idx, column=col_idx)
                 cell.fill = fill
                 cell.border = border
-                if col_idx == 4:
+                if col_idx == n_sum_cols:
                     cell.number_format = '#,##0.00'
                     cell.alignment = Alignment(horizontal="right")
             row_idx += 1
 
-    ws_summary.append(["TOTAL GERAL", "", "", round(grand_total, 2)])
-    for col_idx in range(1, 5):
+    total_row = (["TOTAL GERAL"] + [""] * (n_sum_cols - 2) + [round(grand_total, 2)])
+    ws_summary.append(total_row)
+    for col_idx in range(1, n_sum_cols + 1):
         cell = ws_summary.cell(row=row_idx, column=col_idx)
         cell.font = bold_font
         cell.fill = PatternFill("solid", fgColor="DBEAFE")
         cell.border = border
-        if col_idx == 4:
+        if col_idx == n_sum_cols:
             cell.number_format = '#,##0.00'
 
-    ws_summary.column_dimensions["A"].width = 40
-    ws_summary.column_dimensions["B"].width = 14
-    ws_summary.column_dimensions["C"].width = 12
-    ws_summary.column_dimensions["D"].width = 16
+    ws_summary.column_dimensions["A"].width = 22 if has_sup_col else 40
+    ws_summary.column_dimensions["B"].width = 40 if has_sup_col else 14
+    ws_summary.column_dimensions["C"].width = 14 if has_sup_col else 12
+    ws_summary.column_dimensions["D"].width = 12 if has_sup_col else 16
+    if has_sup_col:
+        ws_summary.column_dimensions["E"].width = 16
 
     # ── Aba 2: Itens detalhados ────────────────────────────────────
     ws_detail = wb.create_sheet("Itens Detalhados")
@@ -4128,8 +4153,9 @@ def render_approved_orders_tab() -> None:
             except Exception:
                 return ym
 
-        # ── Filtro de mês ──────────────────────────────────────────────
-        col_filter, col_stats = st.columns([2, 2])
+        # ── Filtros ────────────────────────────────────────────────────
+        col_filter, col_sup_filter, col_stats = st.columns([2, 2, 2])
+
         with col_filter:
             selected_month = st.selectbox(
                 "📅 Mês de aprovação",
@@ -4138,8 +4164,37 @@ def render_approved_orders_tab() -> None:
                 key="approved_month_filter",
             )
 
+        # Carrega supervisoras a partir dos setores
+        setores_ref = fetch_setores_df()
+        setor_sup_map: Dict[str, str] = {}
+        if not setores_ref.empty and "supervisora" in setores_ref.columns:
+            for _, sr in setores_ref.iterrows():
+                cod = str(sr.get("CódUnidade", "")).strip()
+                sup = str(sr.get("supervisora", "")).strip()
+                if cod and sup and sup != "nan":
+                    setor_sup_map[cod] = sup
+
         filtered_df = orders_df[orders_df["__year_month"] == selected_month].copy()
-        n_orders = len(filtered_df.groupby("order_number"))
+
+        # Injeta supervisora no df de pedidos via código do setor
+        if setor_sup_map:
+            filtered_df["supervisora"] = filtered_df["Setor"].astype(str).str.strip().map(setor_sup_map).fillna("")
+
+        # Filtro por supervisora
+        supervisoras_disponiveis = ["Todas"] + sorted(
+            [s for s in filtered_df["supervisora"].unique() if s and s != "nan"] if "supervisora" in filtered_df.columns else []
+        )
+        with col_sup_filter:
+            selected_sup = st.selectbox(
+                "👩 Supervisora",
+                options=supervisoras_disponiveis,
+                key="approved_sup_filter",
+            )
+
+        if selected_sup != "Todas" and "supervisora" in filtered_df.columns:
+            filtered_df = filtered_df[filtered_df["supervisora"] == selected_sup]
+
+        n_orders = len(filtered_df.groupby("order_number")) if not filtered_df.empty else 0
         n_clients = filtered_df["SETOR2"].nunique() if "SETOR2" in filtered_df.columns else 0
 
         with col_stats:
@@ -4147,6 +4202,8 @@ def render_approved_orders_tab() -> None:
                 f"Pedidos em {_month_label(selected_month)}",
                 f"{n_orders} pedido(s) · {n_clients} cliente(s)",
             )
+
+        group_by_sup = st.checkbox("Agrupar relatório por supervisora", key="approved_group_by_sup", value=False)
 
         # ── Ações do mês filtrado ──────────────────────────────────────
         col_csv, col_pdf, col_excel, col_move = st.columns(4)
@@ -4162,7 +4219,7 @@ def render_approved_orders_tab() -> None:
         with col_csv:
             csv_bytes = export_df.to_csv(index=False, sep=";").encode("utf-8-sig")
             st.download_button(
-                f"📥 CSV",
+                "📥 CSV",
                 data=csv_bytes,
                 file_name=f"pedidos_{selected_month}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                 mime="text/csv",
@@ -4171,9 +4228,9 @@ def render_approved_orders_tab() -> None:
             )
 
         with col_pdf:
-            pdf_buffer = generate_approved_orders_pdf(filtered_df, _month_label(selected_month))
+            pdf_buffer = generate_approved_orders_pdf(filtered_df, _month_label(selected_month), group_by_supervisora=group_by_sup)
             st.download_button(
-                f"📄 PDF",
+                "📄 PDF",
                 data=pdf_buffer,
                 file_name=f"relatorio_{selected_month}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
                 mime="application/pdf",
@@ -4182,9 +4239,9 @@ def render_approved_orders_tab() -> None:
             )
 
         with col_excel:
-            excel_buffer = generate_approved_orders_excel(filtered_df, _month_label(selected_month))
+            excel_buffer = generate_approved_orders_excel(filtered_df, _month_label(selected_month), group_by_supervisora=group_by_sup)
             st.download_button(
-                f"📊 Excel",
+                "📊 Excel",
                 data=excel_buffer,
                 file_name=f"relatorio_{selected_month}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -4637,12 +4694,13 @@ def render_catalog_editor_tab() -> None:
 
         raw_set = fetch_setores_df()
         set_df = raw_set.drop(columns=["__doc_id"], errors="ignore").copy()
-        for col in ["CódUnidade", "items__description"]:
+        for col in ["CódUnidade", "items__description", "supervisora"]:
             if col not in set_df.columns:
                 set_df[col] = ""
-        set_df = set_df[["CódUnidade", "items__description"]]
+        set_df = set_df[["CódUnidade", "items__description", "supervisora"]]
         set_df["CódUnidade"] = set_df["CódUnidade"].astype(str).str.strip()
         set_df["items__description"] = set_df["items__description"].astype(str).str.strip()
+        set_df["supervisora"] = set_df["supervisora"].fillna("").astype(str).str.strip()
         set_df = set_df[set_df["CódUnidade"].str.len() > 0].sort_values("CódUnidade").reset_index(drop=True)
 
         edited_set = st.data_editor(
@@ -4653,6 +4711,12 @@ def render_catalog_editor_tab() -> None:
             column_config={
                 "CódUnidade": st.column_config.TextColumn("Código do Setor", required=True),
                 "items__description": st.column_config.TextColumn("Descrição do Setor", width="large"),
+                "supervisora": st.column_config.SelectboxColumn(
+                    "Supervisora",
+                    options=SUPERVISORAS,
+                    required=False,
+                    width="medium",
+                ),
             },
             key="catalog_editor_setores",
         )
