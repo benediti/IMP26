@@ -3950,7 +3950,11 @@ def render_approved_orders_tab() -> None:
         with col_export:
             export_cols = ["CòdClienteImpakto", "CódProImpakto", "Item", "Qtde", "$ Unitário", "$ Total", "Unidade", "Setor", "SETOR2"]
             available_cols = [c for c in export_cols if c in filtered_df.columns]
-            csv_bytes = filtered_df[available_cols].to_csv(index=False, sep=";").encode("utf-8-sig")
+            export_df = filtered_df[available_cols].copy()
+            for col in ["$ Unitário", "$ Total"]:
+                if col in export_df.columns:
+                    export_df[col] = pd.to_numeric(export_df[col], errors="coerce").round(2)
+            csv_bytes = export_df.to_csv(index=False, sep=";").encode("utf-8-sig")
             st.download_button(
                 f"📥 Exportar {_month_label(selected_month)} (CSV)",
                 data=csv_bytes,
