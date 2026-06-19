@@ -2051,7 +2051,7 @@ def add_item_to_cart(product: dict, quantity: int) -> None:
     for item in st.session_state.cart:
         if item["codigo"] == codigo:
             item["quantidade"] += quantity
-            item["total"] = item["quantidade"] * item["preco_unitario"]
+            item["total"] = round(item["quantidade"] * item["preco_unitario"], 2)
             break
     else:
         st.session_state.cart.append(
@@ -2060,7 +2060,7 @@ def add_item_to_cart(product: dict, quantity: int) -> None:
                 "nome": nome,
                 "quantidade": quantity,
                 "preco_unitario": preco,
-                "total": preco * quantity,
+                "total": round(preco * quantity, 2),
             }
         )
 
@@ -2103,7 +2103,7 @@ def render_cart(compact: bool = True) -> None:
         )
         if nova_qtd != item["quantidade"]:
             item["quantidade"] = int(nova_qtd)
-            item["total"] = item["quantidade"] * item["preco_unitario"]
+            item["total"] = round(item["quantidade"] * item["preco_unitario"], 2)
 
         col_preco.write(format_currency(item["preco_unitario"]))
         col_total.write(format_currency(item["total"]))
@@ -2139,8 +2139,8 @@ def build_cart_rows(destino: str) -> pd.DataFrame:
                 "CódProImpakto": item["codigo"],
                 "Item": item["nome"],
                 "Qtde": int(item["quantidade"]),
-                "$ Unitário": float(item["preco_unitario"]),
-                "$ Total": float(item["total"]),
+                "$ Unitário": round(float(item["preco_unitario"]), 2),
+                "$ Total": round(float(item["total"]), 2),
                 "Unidade": setor["codigo"],
                 "Setor": setor["codigo"],
                 "SETOR2": setor["descricao"],
